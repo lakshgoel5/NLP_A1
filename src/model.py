@@ -1,45 +1,95 @@
+import torch
+import os
+import torch.nn as nn
 import numpy as np
 import math
+import re
 from collections import Counter # for counting word frequencies
 
-class model:
-    def __init__(self, embedding_dim, model_type):
+class Word2Vec(nn.Module):
+    def __init__(self, embedding_dim, model_type = 'sg'):
+        super().__init__() #My class becomes a torch module
         self.embedding_dim = embedding_dim
         self.window_size = 5
         self.model_type = model_type # cbow or sg
-        self.W = None
-        self.U = None
+        self.W_in = None
+        self.W_out = None
         self.unigram = None
 
+        self.lr = 0.01
+        self.epochs = 10
+        self.window_size = 5
+
         self.total_words = 0
-        self.vocab = {} # Dict: word -> index
-        self.idx2word = [] # List: index -> word
+        self.word2idx = {} # Dict: word -> index
+        self.idx2word = {} # Dict: index -> word
+        self.vocab_size = 0
         self.vocab_counts = [] # List: index -> frequency
 
-    def build_vocab(self, file_path):
-        # word_counts = Counter() #DEBUG
-        with open(file_path, 'r') as f:
-            for line in f:
-                words_list = line.split()
-                #DEBUG
-                # word_counts.update(words_list) #.update updates counts of words in words_list to word_counts
-                for word in words_list:
-                    if word not in self.vocab:
-                        self.vocab[word] = len(self.idx2word)
-                        self.idx2word.append(word)
-                        self.vocab_counts.append(0)
+        # DEBUG
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f"Using device: {self.device}")
 
-                    idx = self.vocab[word]
-                    self.vocab_counts[idx] += 1
+    def pre_process(self, author_texts: dict[str, str]):
+        all_tokens = []
+        author_tokens = {}
 
-        self.total_words = sum(self.vocab_counts)
+        for author_id, text in author_texts.items():
+            #lowercase
+            text = text.lower()
+            #remove extra spaces
+            text = ' '.join(text.split())
+            #remove stop words -> Think
+            #lemmatization -> Think
 
-        #DEBUG
-        #bring words of high frequency at starting of idx2word and vocab_counts using counter() later
+            tokens = re.findall(r'\w+|[^\w\s]', text) #tokenise with punctuations
+            #\w+ matches any word character (equal to [a-zA-Z0-9_])
+            #[^\w\s] matches any non-word character and non-space (equal to [^a-zA-Z0-9_])
+            author_tokens[author_id] = tokens
+            all_tokens.extend(tokens)
+
+        return author_tokens, all_tokens
+
+    def build_vocab(self, all_tokens, min_freq=5):
+        #Count
+        word_counts = Counter(all_tokens)
+
+        if min_freq > 1:
+            vocab = {word for word, count in word_counts.items() if count >= min_freq}
+        else:
+            vocab = set(all_tokens)
+
+        vocab_list = sorted(vocab, key=word_counts.get, reverse=True)
+
+        #Add special tokens
+        vocab_list.append("<UNK>") #Unknown
+        vocab_list.append("<PAD>") #Padding
+
+        self.word2idx = {word: idx for idx, word in enumerate(vocab_list)}
+        self.idx2word = {idx: word for word, idx in self.word2idx.items()}
+        self.vocab_size = len(vocab_list)
+
+        self.total_words = len(all_tokens)
+
+        print(f"Vocabulary built: {self.vocab_size} unique tokens")
+        print(f"Total tokens: {self.total_words}")
+
+        return vocab_list
 
     def init_weights(self):
-        self.W = (np.random.randn(self.total_words, self.embedding_dim) - 0.5) / self.embedding_dim
-        self.U = np.zeros(self.total_words, self.embedding_dim)
+        self.W_in = nn.Embedding(self.vocab_size, self.embedding_dim)
+        self.W_out = nn.Embedding(self.vocab_size, self.embedding_dim)
+
+        init_range = 0.5 / self.embedding_dim
+        self.W_in.weight.data.uniform_(-init_range, init_range)
+        self.W_out.weight.data.uniform_(-init_range, init_range)
+        
+        # Move everything to GPU/CPU at once
+        self.to(self.device)
+        
+        print(f"Embeddings initialized: {self.vocab_size} x {self.embedding_dim}")
+        
+        return
 
     #DEBUG
     #Implement unigram later
@@ -48,7 +98,7 @@ class model:
         #DEBUG usually scipy.special.expit is faster.
         if x > 7: return 1
         if x < -7: return 0
-        return 1 / (1 + math.exp(-x))
+        return 1 / (1 + np.exp(-x))
 
 
     def thread(self, data_chunk):
@@ -57,17 +107,7 @@ class model:
             #If a word too frequent, can dicard it
 
         #Sliding window
-        
-        for line in data_chunk:
-            words_list = line.split()
-            for word in words_list:
-                if word not in self.vocab:
-                    self.vocab[word] = len(self.idx2word)
-                    self.idx2word.append(word)
-                    self.vocab_counts.append(0)
 
-                idx = self.vocab[word]
-                self.vocab_counts[idx] += 1
 
         #If cbow
             # Sum up context into hidden layer
@@ -90,12 +130,210 @@ class model:
             #Can try using random window size in context
         pass
 
-    def train(self, file_path):
+    def forward(self, target_list, context_list, mode):
+        loss = 0
+        if mode == 'cbow':
+                # Get context embedding of each word in context list
+            
+            pass
+
+        else:
+            #Get Target word embedding
+
+            #Get all W_out weights
+
+            #Matrix multiply to get score of each pair using torch
+
+            #Find log probabilities(softmax)
+
+            # Equivalent to: loss = -log(P(context_word | target_word))
+            # Cross entropy loss
+            pass
+
+        return loss
+            
+        #Optimization (first set a baseline)
+            #You may try updating vectors without lock, as probability of collision is very low, speed may matter over noise
+            #Can try using random window size in context
+
+    def train_cbow(self):
+        initial_lr = self.lr
+        min_lr = 0.0001
+
+        for epoch in range(self.epochs):
+            epoch_loss = 0
+            batch_count = 0
+
+            current_lr = max(min_lr, initial_lr * (1 - epoch / self.epochs))
+
+            for author_id, tokens in self.author_tokens.items():
+                # Convert tokens to indices
+                indices = []
+                for token in tokens:
+                    if token in self.word2idx:
+                        indices.append(self.word2idx[token])
+                    else:
+                        indices.append(self.word2idx["<UNK>"])
+
+                if len(indices) < self.window_size - 1:
+                    continue
+
+                # Create target and context pairs
+                target_list = []
+                context_lists = []
+                
+                for i in range(len(indices)):
+                    target_word = indices[i]
+                    
+                    # Define context window
+                    window_start = max(0, i - self.window_size)
+                    window_end = min(len(indices), i + self.window_size + 1)
+
+                    context = [indices[j] for j in range(window_start, window_end) if i != j]
+                    
+                    #(target, context list)
+                    if(len(context) > 0):
+                        target_list.append(target_word)
+                        context_lists.append(context)
+                
+                if(len(target_list) == 0):
+                    continue
+
+                batch_size = 256
+                num_batches = (len(target_list) + batch_size - 1) // batch_size
+
+                for i in range(num_batches):
+                    start = i * batch_size
+                    end = min((i + 1) * batch_size, len(target_list))
+
+                    #Convert to tensors
+                    batch_target = torch.LongTensor(target_list[start:end]).to(self.device)
+                    # using LongTensor gurantees that indices of embedding are intigers
+                    batch_contexts_raw = context_lists[start:end]
+                    # context lists might have different sizes, so cant be made a tensor
+                    max_context_size = max(len(context) for context in batch_contexts_raw)
+                    pad_idx = self.word2idx["<PAD>"]
+                    padded = [c + [pad_idx] * (max_context_size - len(c)) for c in batch_contexts_raw]
+                    batch_contexts = torch.LongTensor(padded).to(self.device)
+
+                    loss = self.forward(batch_target, batch_contexts, 'cbow')
+                    epoch_loss += loss.item()
+                    batch_count += 1
+
+                    if self.W_in.weight.grad is not None:
+                        self.W_in.weight.grad.zero_()
+                    if self.W_out.weight.grad is not None:
+                        self.W_out.weight.grad.zero_()
+
+                    loss.backward()
+                    
+                    with torch.no_grad():
+                        # I am just updating numbers now, don't try to calculate gradients of this assignment
+                        self.W_in.weight -= current_lr * self.W_in.weight.grad
+                        self.W_out.weight -= current_lr * self.W_out.weight.grad
+            
+            print(f"Epoch {epoch+1}/{self.epochs}, Loss: {epoch_loss/batch_count:.4f}")
+
+            # Check similarity every two epochs
+            if epoch % 2 == 0:
+                # self.check_similarity() #DEBUG
+                pass
+
+    def train_skipgram(self):
+        #Stochastic gradient descent
+        #self.parameters() finds all nn.Embedding layers defined in init
+
+        # Not allowed
+        # optimizer = torch.optim.SGD(self.parameters(), lr=self.lr)
+
+        initial_lr = self.lr
+        min_lr = 0.0001
+
+        for epoch in range(self.epochs):
+            epoch_loss = 0
+            batch_count = 0
+
+            current_lr = max(min_lr, initial_lr * (1 - epoch / self.epochs))
+
+            for author_id, tokens in self.author_tokens.items():
+                # Convert tokens to indices
+                indices = []
+                for token in tokens:
+                    if token in self.word2idx:
+                        indices.append(self.word2idx[token])
+                    else:
+                        indices.append(self.word2idx["<UNK>"])
+
+                if len(indices) < self.window_size - 1:
+                    continue
+
+                # Create target and context pairs
+                target_list = []
+                context_list = []
+                
+                for i in range(len(indices)):
+                    target_word = indices[i]
+                    
+                    # Define context window
+                    window_start = max(0, i - self.window_size)
+                    window_end = min(len(indices), i + self.window_size + 1)
+
+                    for j in range(window_start, window_end):
+                        if i == j:
+                            continue
+                        
+                        #pushed as pairs
+                        context_word = indices[j]
+                        target_list.append(target_word)
+                        context_list.append(context_word)
+
+                # Process in batches
+                # as GPU has limited memory
+                batch_size = 256
+                num_batches = (len(target_list) + batch_size - 1) // batch_size
+
+                for batch_idx in range(num_batches):
+                    start = batch_idx * batch_size
+                    end = min((batch_idx + 1) * batch_size, len(target_list))
+                    
+                    # Convert python list to torch tensor
+                    # Move to GPU
+                    batch_targets = torch.LongTensor(target_list[start:end]).to(self.device)
+                    batch_contexts = torch.LongTensor(context_list[start:end]).to(self.device)
+
+                    # Loss function (forward pass)
+                    loss = self.forward(batch_targets, batch_contexts, 'sg')
+                    epoch_loss += loss.item()
+                    batch_count += 1
+
+                    # Gradient management (Pytorch accumulates gradients)
+                    if self.W_in.weight.grad is not None:
+                        self.W_in.weight.grad.zero_()
+                    if self.W_out.weight.grad is not None:
+                        self.W_out.weight.grad.zero_()
+
+                    # Backpropagation (backward pass)
+                    loss.backward()
+                    # Update weights
+                    self.W_in.weight.data -= current_lr * self.W_in.weight.grad
+                    self.W_out.weight.data -= current_lr * self.W_out.weight.grad
+
+            # Print Epoch Stats
+            avg_loss = epoch_loss / max(1, batch_count)
+            print(f"Epoch {epoch+1}/{self.epochs}, Loss: {avg_loss:.4f}, LR: {current_lr:.4f}")
+            
+            # Check similarity every two epochs
+            if epoch % 2 == 0:
+                # self.check_similarity() #DEBUG
+                pass
+
+    def train(self, author_texts):
+        author_tokens, all_tokens = self.pre_process(author_texts)
         #prepration
             #Read vocab
             #Count word frequencies
             #Discard rare words
-        self.build_vocab(file_path)
+        vocab = self.build_vocab(all_tokens)
             #Create embedding matrix W
             #Create output matrix U
         self.init_weights()
@@ -104,14 +342,72 @@ class model:
             #Do forward pass
             #Do backpropagation
 
+        if self.model_type == 'cbow':
+            self.train_cbow()
+        else:
+            self.train_skipgram()
         #save embeddings
             #As raw vectors i.e. W
             #As clusters after k-means
-        pass
 
+        return self.W_in.weight.data.cpu().numpy()
+
+    def save_embeddings(self, save_dir='./models'):
+        import pickle #DEBUG
+
+        os.makedirs(save_dir, exist_ok=True)
+
+        #Save embeddings as numpy
+        embeddings = self.W_in.weight.data.cpu().numpy()
+        np.save(f"{save_dir}/embeddings.npy", embeddings)
+
+        #Save vocab
+        with open(f"{save_dir}/word2idx.pkl", 'wb') as f:
+            pickle.dump(self.word2idx, f)
+        
+        with open(f"{save_dir}/idx2word.pkl", 'wb') as f:
+            pickle.dump(self.idx2word, f)
+
+        torch.save({
+            'W_in': self.W_in.state_dict(),
+            'W_out': self.W_out.state_dict(),
+            'vocab_size': self.vocab_size,
+            'embedding_dim': self.embedding_dim,
+            'model_type': self.model_type,
+        }, f"{save_dir}/model.pt")
+
+
+def load_data(train_dir):
+    author_texts = {}
+
+    # Get all .txt files in the directory using os.listdir
+    files = [f for f in os.listdir(train_dir) if f.endswith('.txt')]
+
+    for filename in files:
+        file_path = os.path.join(train_dir, filename)
+        author_id = filename.split(".")[0]
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            text = f.read()
+
+        if author_id not in author_texts:
+            author_texts[author_id] = text
+    return author_texts
 
 def main():
+
     #arguments
+
+
+    train_dir = "../data/train_data"
+    author_texts = load_data(train_dir)
+
+    model = Word2Vec(100, "cbow")
+
+    embeddings = model.train(author_texts)
+    model.save_embeddings('./models')
+    
+
 
     #pre-processing
         #sigmoid calculation
