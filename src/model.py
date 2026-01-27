@@ -16,6 +16,8 @@ class Word2Vec(nn.Module):
         self.W_out = None
         self.unigram = None
 
+        self.author_tokens = None
+
         self.lr = 0.01
         self.epochs = 10
         self.window_size = 5
@@ -50,7 +52,7 @@ class Word2Vec(nn.Module):
 
         return author_tokens, all_tokens
 
-    def build_vocab(self, all_tokens, min_freq=5):
+    def build_vocab(self, all_tokens, min_freq=10):
         #Count
         word_counts = Counter(all_tokens)
 
@@ -80,7 +82,7 @@ class Word2Vec(nn.Module):
         self.W_in = nn.Embedding(self.vocab_size, self.embedding_dim)
         self.W_out = nn.Embedding(self.vocab_size, self.embedding_dim)
 
-        init_range = 0.5 / self.embedding_dim
+        init_range = 0.5 / math.sqrt(self.embedding_dim)
         self.W_in.weight.data.uniform_(-init_range, init_range)
         self.W_out.weight.data.uniform_(-init_range, init_range)
         
@@ -130,107 +132,170 @@ class Word2Vec(nn.Module):
             #Can try using random window size in context
         pass
 
-    def forward(self, target_list, context_list, mode):
-        loss = 0
-        if mode == 'cbow':
-                # Get context embedding of each word in context list
+    # def forward(self, target_list, context_list, mode):
+    #     loss = 0
+    #     if mode == 'cbow':
+    #             # Get context embedding of each word in context list
             
-            pass
+    #         pass
+
+    #     else:
+    #         #Get Target word embedding
+
+    #         #Get all W_out weights
+
+    #         #Matrix multiply to get score of each pair using torch
+
+    #         #Find log probabilities(softmax)
+
+    #         # Equivalent to: loss = -log(P(context_word | target_word))
+    #         # Cross entropy loss
+    #         pass
+
+    #     return loss
+            
+    #     #Optimization (first set a baseline)
+    #         #You may try updating vectors without lock, as probability of collision is very low, speed may matter over noise
+    #         #Can try using random window size in context
+
+    def forward(self, target_list, context_list, mode):
+        # target_list: 
+        #   CBOW: Tensor of [batch_size] (Indices of center words)
+        #   SG:   Tensor of [batch_size] (Indices of center words)
+        
+        # context_list:
+        #   CBOW: Tensor of [batch_size, window_size] (Indices of context words, Padded)
+        #   SG:   Tensor of [batch_size] (Indices of single context words)
+
+        # 1. Define Padding Index (needed for CBOW masking)
+        pad_idx = self.word2idx.get("<PAD>", -1)
+
+        if mode == 'cbow':
+            # --- CBOW: Predict Center (target) from Context (context_list) ---
+            
+            # A. Get embeddings for all context words
+            # Shape: (Batch_Size, Max_Window, Embedding_Dim)
+            context_embeds = self.W_in(context_list)
+
+            # B. Handle Padding (We must not average the <PAD> tokens)
+            # Create a mask: 1 for real words, 0 for <PAD>
+            # Shape: (Batch_Size, Max_Window, 1)
+            mask = (context_list != pad_idx).unsqueeze(-1).float()
+            
+            # Zero out the embeddings of padding tokens
+            masked_embeds = context_embeds * mask
+            
+            # Sum the embeddings along the window dimension
+            sum_embeds = masked_embeds.sum(dim=1)
+            
+            # Count the number of real words in each window to get the mean
+            counts = mask.sum(dim=1)
+            counts[counts == 0] = 1 # Avoid division by zero
+            
+            # Calculate the average vector "h"
+            # Shape: (Batch_Size, Embedding_Dim)
+            h = sum_embeds / counts
+
+            # C. Score against the entire vocabulary (Full Softmax)
+            # We treat W_out as a linear layer weight matrix.
+            # h @ W_out.T
+            # (Batch, Emb) @ (Emb, Vocab) -> (Batch, Vocab)
+            scores = torch.matmul(h, self.W_out.weight.t())
+
+            # D. Calculate Loss
+            # We want to maximize prob of the 'target_list' (the center words)
+            # NLLLoss(LogSoftmax(scores), target) is standard CrossEntropy
+            log_probs = torch.nn.functional.log_softmax(scores, dim=1)
+            loss = torch.nn.functional.nll_loss(log_probs, target_list)
 
         else:
-            #Get Target word embedding
+            # --- Skip-Gram: Predict Context (context_list) from Center (target_list) ---
+            
+            # A. Get embedding for the center word
+            # Shape: (Batch_Size, Embedding_Dim)
+            h = self.W_in(target_list)
 
-            #Get all W_out weights
+            # B. Score against the entire vocabulary
+            # We calculate how well 'h' predicts *every* word in the vocab.
+            # Shape: (Batch_Size, Vocab_Size)
+            scores = torch.matmul(h, self.W_out.weight.t())
 
-            #Matrix multiply to get score of each pair using torch
-
-            #Find log probabilities(softmax)
-
-            # Equivalent to: loss = -log(P(context_word | target_word))
-            # Cross entropy loss
-            pass
+            # C. Calculate Loss
+            # In SG, we want to maximize the probability of the *true context word*.
+            # 'context_list' here contains the indices of the true context words.
+            log_probs = torch.nn.functional.log_softmax(scores, dim=1)
+            loss = torch.nn.functional.nll_loss(log_probs, context_list)
 
         return loss
-            
-        #Optimization (first set a baseline)
-            #You may try updating vectors without lock, as probability of collision is very low, speed may matter over noise
-            #Can try using random window size in context
 
     def train_cbow(self):
         initial_lr = self.lr
         min_lr = 0.0001
 
+        target_list = []
+        context_lists = []
+
+        #Create target and context list pairs
+        for author_id, tokens in self.author_tokens.items():
+            # Convert tokens to indices
+            indices = [self.word2idx.get(t, self.word2idx["<UNK>"]) for t in tokens]
+
+            if len(indices) < self.window_size - 1:
+                continue
+            
+            for i in range(len(indices)):
+                target_word = indices[i]
+                
+                # Define context window
+                window_start = max(0, i - self.window_size)
+                window_end = min(len(indices), i + self.window_size + 1)
+
+                context = [indices[j] for j in range(window_start, window_end) if i != j]
+                
+                #(target, context list)
+                if(len(context) > 0):
+                    target_list.append(target_word)
+                    context_lists.append(context)
+
+        #Train
         for epoch in range(self.epochs):
             epoch_loss = 0
             batch_count = 0
 
             current_lr = max(min_lr, initial_lr * (1 - epoch / self.epochs))
 
-            for author_id, tokens in self.author_tokens.items():
-                # Convert tokens to indices
-                indices = []
-                for token in tokens:
-                    if token in self.word2idx:
-                        indices.append(self.word2idx[token])
-                    else:
-                        indices.append(self.word2idx["<UNK>"])
+            batch_size = 256
+            num_batches = (len(target_list) + batch_size - 1) // batch_size
 
-                if len(indices) < self.window_size - 1:
-                    continue
+            for i in range(num_batches):
+                start = i * batch_size
+                end = min((i + 1) * batch_size, len(target_list))
 
-                # Create target and context pairs
-                target_list = []
-                context_lists = []
+                #Convert to tensors
+                batch_target = torch.LongTensor(target_list[start:end]).to(self.device)
+                # using LongTensor gurantees that indices of embedding are intigers
+                batch_contexts_raw = context_lists[start:end]
+                # context lists might have different sizes, so cant be made a tensor
+                max_context_size = max(len(context) for context in batch_contexts_raw)
+                pad_idx = self.word2idx["<PAD>"]
+                padded = [c + [pad_idx] * (max_context_size - len(c)) for c in batch_contexts_raw]
+                batch_contexts = torch.LongTensor(padded).to(self.device)
+
+                loss = self.forward(batch_target, batch_contexts, 'cbow')
+                epoch_loss += loss.item()
+                batch_count += 1
+
+                if self.W_in.weight.grad is not None:
+                    self.W_in.weight.grad.zero_()
+                if self.W_out.weight.grad is not None:
+                    self.W_out.weight.grad.zero_()
+
+                loss.backward()
                 
-                for i in range(len(indices)):
-                    target_word = indices[i]
-                    
-                    # Define context window
-                    window_start = max(0, i - self.window_size)
-                    window_end = min(len(indices), i + self.window_size + 1)
-
-                    context = [indices[j] for j in range(window_start, window_end) if i != j]
-                    
-                    #(target, context list)
-                    if(len(context) > 0):
-                        target_list.append(target_word)
-                        context_lists.append(context)
-                
-                if(len(target_list) == 0):
-                    continue
-
-                batch_size = 256
-                num_batches = (len(target_list) + batch_size - 1) // batch_size
-
-                for i in range(num_batches):
-                    start = i * batch_size
-                    end = min((i + 1) * batch_size, len(target_list))
-
-                    #Convert to tensors
-                    batch_target = torch.LongTensor(target_list[start:end]).to(self.device)
-                    # using LongTensor gurantees that indices of embedding are intigers
-                    batch_contexts_raw = context_lists[start:end]
-                    # context lists might have different sizes, so cant be made a tensor
-                    max_context_size = max(len(context) for context in batch_contexts_raw)
-                    pad_idx = self.word2idx["<PAD>"]
-                    padded = [c + [pad_idx] * (max_context_size - len(c)) for c in batch_contexts_raw]
-                    batch_contexts = torch.LongTensor(padded).to(self.device)
-
-                    loss = self.forward(batch_target, batch_contexts, 'cbow')
-                    epoch_loss += loss.item()
-                    batch_count += 1
-
-                    if self.W_in.weight.grad is not None:
-                        self.W_in.weight.grad.zero_()
-                    if self.W_out.weight.grad is not None:
-                        self.W_out.weight.grad.zero_()
-
-                    loss.backward()
-                    
-                    with torch.no_grad():
-                        # I am just updating numbers now, don't try to calculate gradients of this assignment
-                        self.W_in.weight -= current_lr * self.W_in.weight.grad
-                        self.W_out.weight -= current_lr * self.W_out.weight.grad
+                with torch.no_grad():
+                    # I am just updating numbers now, don't try to calculate gradients of this assignment
+                    self.W_in.weight -= current_lr * self.W_in.weight.grad
+                    self.W_out.weight -= current_lr * self.W_out.weight.grad
             
             print(f"Epoch {epoch+1}/{self.epochs}, Loss: {epoch_loss/batch_count:.4f}")
 
@@ -249,74 +314,72 @@ class Word2Vec(nn.Module):
         initial_lr = self.lr
         min_lr = 0.0001
 
+        # Create target and context pairs
+        target_list = []
+        context_list = []
+
+        for author_id, tokens in self.author_tokens.items():
+            # Convert tokens to indices
+            indices = [self.word2idx.get(t, self.word2idx["<UNK>"]) for t in tokens]
+
+            if len(indices) < self.window_size - 1:
+                continue
+
+            
+            for i in range(len(indices)):
+                target_word = indices[i]
+                
+                # Define context window
+                window_start = max(0, i - self.window_size)
+                window_end = min(len(indices), i + self.window_size + 1)
+
+                for j in range(window_start, window_end):
+                    if i == j:
+                        continue
+                    
+                    #pushed as pairs
+                    context_word = indices[j]
+                    target_list.append(target_word)
+                    context_list.append(context_word)
+
+        #Train
         for epoch in range(self.epochs):
             epoch_loss = 0
             batch_count = 0
 
             current_lr = max(min_lr, initial_lr * (1 - epoch / self.epochs))
 
-            for author_id, tokens in self.author_tokens.items():
-                # Convert tokens to indices
-                indices = []
-                for token in tokens:
-                    if token in self.word2idx:
-                        indices.append(self.word2idx[token])
-                    else:
-                        indices.append(self.word2idx["<UNK>"])
+            # Process in batches
+            # as GPU has limited memory
+            batch_size = 256
+            num_batches = (len(target_list) + batch_size - 1) // batch_size
 
-                if len(indices) < self.window_size - 1:
-                    continue
-
-                # Create target and context pairs
-                target_list = []
-                context_list = []
+            for batch_idx in range(num_batches):
+                start = batch_idx * batch_size
+                end = min((batch_idx + 1) * batch_size, len(target_list))
                 
-                for i in range(len(indices)):
-                    target_word = indices[i]
-                    
-                    # Define context window
-                    window_start = max(0, i - self.window_size)
-                    window_end = min(len(indices), i + self.window_size + 1)
+                # Convert python list to torch tensor
+                # Move to GPU
+                batch_targets = torch.LongTensor(target_list[start:end]).to(self.device)
+                batch_contexts = torch.LongTensor(context_list[start:end]).to(self.device)
 
-                    for j in range(window_start, window_end):
-                        if i == j:
-                            continue
-                        
-                        #pushed as pairs
-                        context_word = indices[j]
-                        target_list.append(target_word)
-                        context_list.append(context_word)
+                # Loss function (forward pass)
+                loss = self.forward(batch_targets, batch_contexts, 'sg')
+                epoch_loss += loss.item()
+                batch_count += 1
 
-                # Process in batches
-                # as GPU has limited memory
-                batch_size = 256
-                num_batches = (len(target_list) + batch_size - 1) // batch_size
+                # Gradient management (Pytorch accumulates gradients)
+                if self.W_in.weight.grad is not None:
+                    self.W_in.weight.grad.zero_()
+                if self.W_out.weight.grad is not None:
+                    self.W_out.weight.grad.zero_()
 
-                for batch_idx in range(num_batches):
-                    start = batch_idx * batch_size
-                    end = min((batch_idx + 1) * batch_size, len(target_list))
-                    
-                    # Convert python list to torch tensor
-                    # Move to GPU
-                    batch_targets = torch.LongTensor(target_list[start:end]).to(self.device)
-                    batch_contexts = torch.LongTensor(context_list[start:end]).to(self.device)
-
-                    # Loss function (forward pass)
-                    loss = self.forward(batch_targets, batch_contexts, 'sg')
-                    epoch_loss += loss.item()
-                    batch_count += 1
-
-                    # Gradient management (Pytorch accumulates gradients)
-                    if self.W_in.weight.grad is not None:
-                        self.W_in.weight.grad.zero_()
-                    if self.W_out.weight.grad is not None:
-                        self.W_out.weight.grad.zero_()
-
-                    # Backpropagation (backward pass)
-                    loss.backward()
-                    # Update weights
-                    self.W_in.weight.data -= current_lr * self.W_in.weight.grad
-                    self.W_out.weight.data -= current_lr * self.W_out.weight.grad
+                # Backpropagation (backward pass)
+                loss.backward()
+                # Update weights
+                with torch.no_grad():
+                    self.W_in.weight -= current_lr * self.W_in.weight.grad
+                    self.W_out.weight -= current_lr * self.W_out.weight.grad
 
             # Print Epoch Stats
             avg_loss = epoch_loss / max(1, batch_count)
@@ -328,7 +391,7 @@ class Word2Vec(nn.Module):
                 pass
 
     def train(self, author_texts):
-        author_tokens, all_tokens = self.pre_process(author_texts)
+        self.author_tokens, all_tokens = self.pre_process(author_texts)
         #prepration
             #Read vocab
             #Count word frequencies
@@ -406,15 +469,7 @@ def main():
 
     embeddings = model.train(author_texts)
     model.save_embeddings('./models')
-    
 
-
-    #pre-processing
-        #sigmoid calculation
-    
-    #training
-        
-    pass
 
 if __name__ == "__main__":
     main()
