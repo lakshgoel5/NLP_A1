@@ -36,10 +36,6 @@ class Word2Vec(nn.Module):
         
         # Subsampling threshold for frequent words
         self.subsample_threshold = 0
-        
-        # Distance-based context weighting (Word-Space Model)
-        self.use_distance_weighting = True  # Enable distance-based weighting
-        self.weighting_scheme = "aggressive"  # "aggressive" or "glove"
 
         # DEBUG
         self.device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
@@ -143,31 +139,6 @@ class Word2Vec(nn.Module):
         keep_prob = (math.sqrt(freq_ratio) + 1) / freq_ratio
         
         return min(keep_prob, 1.0)  # Clamp to [0, 1]
-    
-    def get_distance_weight(self, distance):
-        """
-        Calculate weight based on distance from target word.
-        Implements Word-Space Model (Sahlgren, 2006) weighting schemes.
-        
-        Args:
-            distance: Absolute distance from target word (1, 2, 3, ...)
-        
-        Returns:
-            Weight value (higher for closer words)
-        """
-        if not self.use_distance_weighting or distance == 0:
-            return 1.0
-        
-        if self.weighting_scheme == "aggressive":
-            # Aggressive: 1/(2^(distance-1))
-            # distance=1 -> 1/1, distance=2 -> 1/2, distance=3 -> 1/4, distance=4 -> 1/8
-            return 1.0 / (2 ** (distance - 1))
-        elif self.weighting_scheme == "glove":
-            # GloVe-style: 1/distance
-            # distance=1 -> 1/1, distance=2 -> 1/2, distance=3 -> 1/3, distance=4 -> 1/4
-            return 1.0 / distance
-        else:
-            return 1.0  # Uniform weighting
 
     def init_weights(self):
         self.W_in = nn.Embedding(self.vocab_size, self.embedding_dim)
@@ -229,11 +200,10 @@ class Word2Vec(nn.Module):
         scores = torch.matmul(h, self.W_out.weight.t())  # [batch, vocab_size]
         return scores
 
-    def loss_function(self, target_list, context_list, weights=None):
+    def loss_function(self, target_list, context_list):
         # context_list:
         #   CBOW: Tensor of [batch_size, window_size] (Indices of context words, Padded)
         #   SG:   Tensor of [batch_size] (Indices of single context words)
-        # weights: Optional tensor of [batch_size] for distance-based weighting (SG only)
 
         pad_idx = self.word2idx.get("<PAD>", -1)
 
@@ -251,41 +221,31 @@ class Word2Vec(nn.Module):
             # unsqueeze(-1) to add a dimension as we multiply with context_embeds
             mask = (context_list != pad_idx).unsqueeze(-1).float()
             
-            # Apply distance-based weighting if provided
-            if weights is not None:
-                # weights: (Batch, Window_Size)
-                # Expand to (Batch, Window_Size, 1) to multiply with embeddings
-                weight_mask = weights.unsqueeze(-1) * mask
-                # Weighted embeddings
-                weighted_embeds = context_embeds * weight_mask
-                # Sum weighted embeddings
-                sum_embeds = weighted_embeds.sum(dim=1)
-                # Sum of weights (for normalization)
-                weight_sum = weight_mask.sum(dim=1).clamp(min=1e-8)
-                # Weighted average
-                h = sum_embeds / weight_sum
-            else:
-                # Original uniform averaging
-                # Zero out the embeddings of padding tokens
-                # Dimension of masked_embeds: Batch_Size x Window_Size x Embedding_Dim
-                masked_embeds = context_embeds * mask
-                
-                # Sum the embeddings along the window dimension i.e. sum over all context words of target word
-                # Dimension of sum_embeds: Batch_Size x Embedding_Dim
-                sum_embeds = masked_embeds.sum(dim=1)
-                
-                # Count the number of real words in each window to get the mean
-                # Dimension of counts: Batch_Size x 1
-                counts = mask.sum(dim=1)
+            # Zero out the embeddings of padding tokens
+            # Dimension of masked_embeds: Batch_Size x Window_Size x Embedding_Dim
+            masked_embeds = context_embeds * mask
+            
+            # Sum the embeddings along the window dimension i.e. sum over all context words of target word
+            # Dimension of sum_embeds: Batch_Size x Embedding_Dim
+            sum_embeds = masked_embeds.sum(dim=1)
+            
+            # Count the number of real words in each window to get the mean
+            # Dimension of counts: Batch_Size x 1
+            counts = mask.sum(dim=1)
 
-                # Vectorized version
-                counts = counts.clamp(min=1e-8)
-                # Replace all 0s with 1 in one operation
-                
-                # Calculate the average vector "h"
-                # Dimension of h: Batch_Size x Embedding_Dim
-                h = sum_embeds / counts
-                # Tensor extends dimensions by itself
+            # BElow loop very slow for Pytorch
+            # for i in range(len(counts)):
+            #     if counts[i] == 0:
+            #         counts[i] = 1
+
+            # Vectorized version
+            counts = counts.clamp(min=1)
+            # Replace all 0s with 1 in one operation
+            
+            # Calculate the average vector "h"
+            # Dimension of h: Batch_Size x Embedding_Dim
+            h = sum_embeds / counts
+            # Tensor extends dimensions by itself
 
             # Full Softmax
             # We treat W_out as a linear layer weight matrix.
@@ -315,45 +275,21 @@ class Word2Vec(nn.Module):
             # In SG, we want to maximize the probability of the *true context word*.
             # 'context_list' here contains the indices of the true context words.
             log_probs = torch.nn.functional.log_softmax(scores, dim=1)
-            
-            # Apply distance-based weighting if provided
-            if weights is not None:
-                # Get log probs for the true context words
-                target_log_probs = log_probs.gather(1, context_list.unsqueeze(1)).squeeze(1)
-                # Weight the loss by distance
-                loss = -(target_log_probs * weights).mean()
-            else:
-                loss = torch.nn.functional.nll_loss(log_probs, context_list)
+            loss = torch.nn.functional.nll_loss(log_probs, context_list)
 
         return loss
 
-    def loss_function_ns(self, target_list, context_list, negative_samples, weights=None):
+    def loss_function_ns(self, target_list, context_list, negative_samples):
         pad_idx = self.word2idx.get("<PAD>", -1)
 
         if self.model_type == 'cbow':
             context_embeds = self.W_in(context_list)
             mask = (context_list != pad_idx).unsqueeze(-1).float()
-            
-            # Apply distance-based weighting if provided
-            if weights is not None:
-                # weights: (Batch, Window_Size)
-                # Expand to (Batch, Window_Size, 1) to multiply with embeddings
-                weight_mask = weights.unsqueeze(-1) * mask
-                # Weighted embeddings
-                weighted_embeds = context_embeds * weight_mask
-                # Sum weighted embeddings
-                sum_embeds = weighted_embeds.sum(dim=1)
-                # Sum of weights (for normalization)
-                weight_sum = weight_mask.sum(dim=1).clamp(min=1e-8)
-                # Weighted average
-                h = sum_embeds / weight_sum
-            else:
-                # Original uniform averaging
-                masked_embeds = context_embeds * mask
-                sum_embeds = masked_embeds.sum(dim=1)
-                counts = mask.sum(dim=1)
-                counts = counts.clamp(min=1)
-                h = sum_embeds / counts
+            masked_embeds = context_embeds * mask
+            sum_embeds = masked_embeds.sum(dim=1)
+            counts = mask.sum(dim=1)
+            counts = counts.clamp(min=1)
+            h = sum_embeds / counts
 
             # -- Positive scores --
             positive_out = self.W_out(target_list)
@@ -400,15 +336,9 @@ class Word2Vec(nn.Module):
             #negative_score: (Batch, num_negative_samples)
             negative_score = torch.bmm(negative_out, h.unsqueeze(-1)).squeeze(-1)
 
-            # Calculate per-sample loss
-            sample_loss = -torch.nn.functional.logsigmoid(positive_score) - torch.sum(torch.nn.functional.logsigmoid(-negative_score), dim=1)
-            
-            # Apply distance-based weighting if provided
-            if weights is not None:
-                loss = (sample_loss * weights).mean()
-            else:
-                loss = sample_loss.mean()
-            
+
+            loss = -torch.nn.functional.logsigmoid(positive_score) - torch.sum(torch.nn.functional.logsigmoid(-negative_score), dim=1)
+            loss = loss.mean()
             return loss
 
 
@@ -418,7 +348,6 @@ class Word2Vec(nn.Module):
 
         target_list = []
         context_lists = []
-        weight_lists = []  # Store distance weights for each context word
 
         #Create target and context list pairs
         for author_id, tokens in self.author_tokens.items():
@@ -442,20 +371,12 @@ class Word2Vec(nn.Module):
                 window_start = max(0, i - dynamic_window)
                 window_end = min(len(indices), i + dynamic_window + 1)
 
-                context = []
-                weights = []
-                for j in range(window_start, window_end):
-                    if i != j:
-                        distance = abs(i - j)
-                        weight = self.get_distance_weight(distance)
-                        context.append(indices[j])
-                        weights.append(weight)
+                context = [indices[j] for j in range(window_start, window_end) if i != j]
                 
-                #(target, context list, weight list)
+                #(target, context list)
                 if(len(context) > 0):
                     target_list.append(target_word)
                     context_lists.append(context)
-                    weight_lists.append(weights)
 
         #Train
         print(f"Starting CBOW Training on {self.device}...") #DEBUG
@@ -480,20 +401,17 @@ class Word2Vec(nn.Module):
                 batch_target = torch.LongTensor(target_list[start:end]).to(self.device)
                 # using LongTensor gurantees that indices of embedding are intigers
                 batch_contexts_raw = context_lists[start:end]
-                batch_weights_raw = weight_lists[start:end]
                 # context lists might have different sizes, so cant be made a tensor
                 max_context_size = max(len(context) for context in batch_contexts_raw)
                 pad_idx = self.word2idx["<PAD>"]
-                padded_contexts = [c + [pad_idx] * (max_context_size - len(c)) for c in batch_contexts_raw]
-                padded_weights = [w + [0.0] * (max_context_size - len(w)) for w in batch_weights_raw]
-                batch_contexts = torch.LongTensor(padded_contexts).to(self.device)
-                batch_weights = torch.FloatTensor(padded_weights).to(self.device)
+                padded = [c + [pad_idx] * (max_context_size - len(c)) for c in batch_contexts_raw]
+                batch_contexts = torch.LongTensor(padded).to(self.device)
 
                 optimizer.zero_grad() # Clear gradients
 
                 loss = 0
                 if(self.model_speed == "softmax"):
-                    loss = self.loss_function(batch_target, batch_contexts, batch_weights)
+                    loss = self.loss_function(batch_target, batch_contexts)
                 else:
                     current_batch_size = end - start
                     # This picks 5 random words for every single target word in the batch. By doing this inside the batch, we ensure that the model sees different "negative" examples in every epoch, which is key for learning what a word is not.
@@ -503,7 +421,7 @@ class Word2Vec(nn.Module):
                     # .view reshapes 1D vector to 2D matrix of size (batch_size, num_negatives)
                     batch_neg = batch_neg.view(current_batch_size, self.num_negatives).to(self.device)
 
-                    loss = self.loss_function_ns(batch_target, batch_contexts, batch_neg, batch_weights)
+                    loss = self.loss_function_ns(batch_target, batch_contexts, batch_neg)
                 
                 epoch_loss += loss.item()
                 batch_count += 1
@@ -521,10 +439,9 @@ class Word2Vec(nn.Module):
         # Initialize Adam Optimizer
         optimizer = torch.optim.Adam(self.parameters(), lr=0.001)
 
-        # Create target and context pairs with distance weights
+        # Create target and context pairs
         target_list = []
         context_list = []
-        weight_list = []  # Store distance weights
 
         for author_id, tokens in self.author_tokens.items():
             # Convert tokens to indices
@@ -551,15 +468,10 @@ class Word2Vec(nn.Module):
                     if i == j:
                         continue
                     
-                    # Calculate distance and weight
-                    distance = abs(i - j)
-                    weight = self.get_distance_weight(distance)
-                    
-                    #pushed as pairs with weights
+                    #pushed as pairs
                     context_word = indices[j]
                     target_list.append(target_word)
                     context_list.append(context_word)
-                    weight_list.append(weight)
 
         #Train
         print(f"Starting Skip-Gram Training on {self.device}...") #DEBUG
@@ -583,19 +495,18 @@ class Word2Vec(nn.Module):
                 # Move to GPU
                 batch_targets = torch.LongTensor(target_list[start:end]).to(self.device)
                 batch_contexts = torch.LongTensor(context_list[start:end]).to(self.device)
-                batch_weights = torch.FloatTensor(weight_list[start:end]).to(self.device)
 
                 optimizer.zero_grad() # Clear gradients
 
                 # Loss function (loss_function pass)
                 if(self.model_speed == "softmax"):
-                    loss = self.loss_function(batch_targets, batch_contexts, batch_weights)
+                    loss = self.loss_function(batch_targets, batch_contexts)
                 else:
                     current_batch_size = end - start
                     batch_neg = torch.multinomial(self.unigram_dist, current_batch_size * self.num_negatives, replacement=True)
                     batch_neg = batch_neg.view(current_batch_size, self.num_negatives).to(self.device)
 
-                    loss = self.loss_function_ns(batch_targets, batch_contexts, batch_neg, batch_weights)
+                    loss = self.loss_function_ns(batch_targets, batch_contexts, batch_neg)
                 
                 epoch_loss += loss.item()
                 batch_count += 1
