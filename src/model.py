@@ -19,7 +19,7 @@ class Word2Vec(nn.Module):
         self.author_tokens = None
 
         self.lr = 0.025
-        self.epochs = 20
+        self.epochs = 10
         self.window_size = 5
 
         self.total_words = 0
@@ -40,6 +40,13 @@ class Word2Vec(nn.Module):
         # Distance-based context weighting (Word-Space Model)
         self.use_distance_weighting = True  # Enable distance-based weighting
         self.weighting_scheme = "aggressive"  # "aggressive" or "glove"
+        
+        # Document-aware embeddings (Paragraph Vector / Doc2Vec)
+        self.use_doc_embeddings = True  # Enable document embeddings
+        self.num_docs = 0
+        self.doc2idx = {}  # Dict: author_id -> doc_index
+        self.idx2doc = {}  # Dict: doc_index -> author_id
+        self.D = None  # Document embedding matrix
 
         # DEBUG
         self.device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
@@ -109,6 +116,14 @@ class Word2Vec(nn.Module):
         self.unigram_dist /= self.unigram_dist.sum()
         
         self.total_words = len(all_tokens)
+        
+        # Build document index if document embeddings are enabled
+        if self.use_doc_embeddings and self.author_tokens is not None:
+            doc_ids = sorted(self.author_tokens.keys())
+            self.doc2idx = {doc_id: idx for idx, doc_id in enumerate(doc_ids)}
+            self.idx2doc = {idx: doc_id for doc_id, idx in self.doc2idx.items()}
+            self.num_docs = len(doc_ids)
+            print(f"Document index built: {self.num_docs} documents")
 
         print(f"Vocabulary built: {self.vocab_size} unique tokens")
         print(f"Total tokens: {self.total_words}")
@@ -177,6 +192,12 @@ class Word2Vec(nn.Module):
         self.W_in.weight.data.uniform_(-init_range, init_range)
         self.W_out.weight.data.uniform_(-init_range, init_range)
         
+        # Initialize document embeddings if enabled
+        if self.use_doc_embeddings and self.num_docs > 0:
+            self.D = nn.Embedding(self.num_docs, self.embedding_dim)
+            self.D.weight.data.uniform_(-init_range, init_range)
+            print(f"Document embeddings initialized: {self.num_docs} x {self.embedding_dim}")
+        
         # Move everything to GPU/CPU at once
         self.to(self.device)
         
@@ -229,11 +250,12 @@ class Word2Vec(nn.Module):
         scores = torch.matmul(h, self.W_out.weight.t())  # [batch, vocab_size]
         return scores
 
-    def loss_function(self, target_list, context_list, weights=None):
+    def loss_function(self, target_list, context_list, weights=None, doc_ids=None):
         # context_list:
         #   CBOW: Tensor of [batch_size, window_size] (Indices of context words, Padded)
         #   SG:   Tensor of [batch_size] (Indices of single context words)
-        # weights: Optional tensor of [batch_size] for distance-based weighting (SG only)
+        # weights: Optional tensor for distance-based weighting
+        # doc_ids: Optional tensor of [batch_size] for document IDs
 
         pad_idx = self.word2idx.get("<PAD>", -1)
 
@@ -286,6 +308,11 @@ class Word2Vec(nn.Module):
                 # Dimension of h: Batch_Size x Embedding_Dim
                 h = sum_embeds / counts
                 # Tensor extends dimensions by itself
+            
+            # Add document embedding if enabled
+            if self.use_doc_embeddings and doc_ids is not None and self.D is not None:
+                doc_embeds = self.D(doc_ids)  # (Batch, Emb)
+                h = h + doc_embeds  # Combine word context and document embeddings
 
             # Full Softmax
             # We treat W_out as a linear layer weight matrix.
@@ -305,6 +332,11 @@ class Word2Vec(nn.Module):
             
             # Get embedding for the center word
             h = self.W_in(target_list)
+            
+            # Add document embedding if enabled
+            if self.use_doc_embeddings and doc_ids is not None and self.D is not None:
+                doc_embeds = self.D(doc_ids)  # (Batch, Emb)
+                h = h + doc_embeds  # Combine word and document embeddings
 
             # Score against the entire vocabulary
             # We calculate how well 'h' predicts "every" word in the vocab.
@@ -327,7 +359,7 @@ class Word2Vec(nn.Module):
 
         return loss
 
-    def loss_function_ns(self, target_list, context_list, negative_samples, weights=None):
+    def loss_function_ns(self, target_list, context_list, negative_samples, weights=None, doc_ids=None):
         pad_idx = self.word2idx.get("<PAD>", -1)
 
         if self.model_type == 'cbow':
@@ -354,6 +386,11 @@ class Word2Vec(nn.Module):
                 counts = mask.sum(dim=1)
                 counts = counts.clamp(min=1)
                 h = sum_embeds / counts
+            
+            # Add document embedding if enabled
+            if self.use_doc_embeddings and doc_ids is not None and self.D is not None:
+                doc_embeds = self.D(doc_ids)  # (Batch, Emb)
+                h = h + doc_embeds  # Combine word context and document embeddings
 
             # -- Positive scores --
             positive_out = self.W_out(target_list)
@@ -389,6 +426,11 @@ class Word2Vec(nn.Module):
             return loss
         else:
             h = self.W_in(target_list)
+            
+            # Add document embedding if enabled
+            if self.use_doc_embeddings and doc_ids is not None and self.D is not None:
+                doc_embeds = self.D(doc_ids)  # (Batch, Emb)
+                h = h + doc_embeds  # Combine word and document embeddings
 
             positive_out = self.W_out(context_list)
             positive_score = torch.sum(h * positive_out, dim=1)
@@ -419,11 +461,15 @@ class Word2Vec(nn.Module):
         target_list = []
         context_lists = []
         weight_lists = []  # Store distance weights for each context word
+        doc_id_list = []  # Store document IDs
 
         #Create target and context list pairs
         for author_id, tokens in self.author_tokens.items():
             # Convert tokens to indices
             indices = [self.word2idx.get(t, self.word2idx["<UNK>"]) for t in tokens]
+            
+            # Get document index if document embeddings are enabled
+            doc_idx = self.doc2idx.get(author_id, 0) if self.use_doc_embeddings else 0
 
             if len(indices) < self.window_size - 1:
                 continue
@@ -451,11 +497,12 @@ class Word2Vec(nn.Module):
                         context.append(indices[j])
                         weights.append(weight)
                 
-                #(target, context list, weight list)
+                #(target, context list, weight list, doc_id)
                 if(len(context) > 0):
                     target_list.append(target_word)
                     context_lists.append(context)
                     weight_lists.append(weights)
+                    doc_id_list.append(doc_idx)
 
         #Train
         print(f"Starting CBOW Training on {self.device}...") #DEBUG
@@ -481,6 +528,7 @@ class Word2Vec(nn.Module):
                 # using LongTensor gurantees that indices of embedding are intigers
                 batch_contexts_raw = context_lists[start:end]
                 batch_weights_raw = weight_lists[start:end]
+                batch_doc_ids = torch.LongTensor(doc_id_list[start:end]).to(self.device)
                 # context lists might have different sizes, so cant be made a tensor
                 max_context_size = max(len(context) for context in batch_contexts_raw)
                 pad_idx = self.word2idx["<PAD>"]
@@ -493,7 +541,7 @@ class Word2Vec(nn.Module):
 
                 loss = 0
                 if(self.model_speed == "softmax"):
-                    loss = self.loss_function(batch_target, batch_contexts, batch_weights)
+                    loss = self.loss_function(batch_target, batch_contexts, batch_weights, batch_doc_ids)
                 else:
                     current_batch_size = end - start
                     # This picks 5 random words for every single target word in the batch. By doing this inside the batch, we ensure that the model sees different "negative" examples in every epoch, which is key for learning what a word is not.
@@ -503,7 +551,7 @@ class Word2Vec(nn.Module):
                     # .view reshapes 1D vector to 2D matrix of size (batch_size, num_negatives)
                     batch_neg = batch_neg.view(current_batch_size, self.num_negatives).to(self.device)
 
-                    loss = self.loss_function_ns(batch_target, batch_contexts, batch_neg, batch_weights)
+                    loss = self.loss_function_ns(batch_target, batch_contexts, batch_neg, batch_weights, batch_doc_ids)
                 
                 epoch_loss += loss.item()
                 batch_count += 1
@@ -521,14 +569,18 @@ class Word2Vec(nn.Module):
         # Initialize Adam Optimizer
         optimizer = torch.optim.Adam(self.parameters(), lr=0.001)
 
-        # Create target and context pairs with distance weights
+        # Create target and context pairs with distance weights and document IDs
         target_list = []
         context_list = []
         weight_list = []  # Store distance weights
+        doc_id_list = []  # Store document IDs
 
         for author_id, tokens in self.author_tokens.items():
             # Convert tokens to indices
             indices = [self.word2idx.get(t, self.word2idx["<UNK>"]) for t in tokens]
+            
+            # Get document index if document embeddings are enabled
+            doc_idx = self.doc2idx.get(author_id, 0) if self.use_doc_embeddings else 0
 
             if len(indices) < self.window_size - 1:
                 continue
@@ -555,11 +607,12 @@ class Word2Vec(nn.Module):
                     distance = abs(i - j)
                     weight = self.get_distance_weight(distance)
                     
-                    #pushed as pairs with weights
+                    #pushed as pairs with weights and doc_id
                     context_word = indices[j]
                     target_list.append(target_word)
                     context_list.append(context_word)
                     weight_list.append(weight)
+                    doc_id_list.append(doc_idx)
 
         #Train
         print(f"Starting Skip-Gram Training on {self.device}...") #DEBUG
@@ -584,18 +637,19 @@ class Word2Vec(nn.Module):
                 batch_targets = torch.LongTensor(target_list[start:end]).to(self.device)
                 batch_contexts = torch.LongTensor(context_list[start:end]).to(self.device)
                 batch_weights = torch.FloatTensor(weight_list[start:end]).to(self.device)
+                batch_doc_ids = torch.LongTensor(doc_id_list[start:end]).to(self.device)
 
                 optimizer.zero_grad() # Clear gradients
 
                 # Loss function (loss_function pass)
                 if(self.model_speed == "softmax"):
-                    loss = self.loss_function(batch_targets, batch_contexts, batch_weights)
+                    loss = self.loss_function(batch_targets, batch_contexts, batch_weights, batch_doc_ids)
                 else:
                     current_batch_size = end - start
                     batch_neg = torch.multinomial(self.unigram_dist, current_batch_size * self.num_negatives, replacement=True)
                     batch_neg = batch_neg.view(current_batch_size, self.num_negatives).to(self.device)
 
-                    loss = self.loss_function_ns(batch_targets, batch_contexts, batch_neg, batch_weights)
+                    loss = self.loss_function_ns(batch_targets, batch_contexts, batch_neg, batch_weights, batch_doc_ids)
                 
                 epoch_loss += loss.item()
                 batch_count += 1

@@ -19,7 +19,7 @@ class Word2Vec(nn.Module):
         self.author_tokens = None
 
         self.lr = 0.025
-        self.epochs = 20
+        self.epochs = 10
         self.window_size = 5
 
         self.total_words = 0
