@@ -14,7 +14,7 @@ if [ "$1" = "test1" ]; then
     
     echo "Running Task 1 (Author Verification) inference on $TEST_FILE..."
     # TODO: Call your python inference script here
-    # python3 src/inference_task1.py "$TEST_FILE" "$OUTPUT_DIR"
+    python3 src/inference_task1.py "$TEST_FILE" "$OUTPUT_DIR"
     
 elif [ "$1" = "test2" ]; then
     # Task 2 Inference Mode (Author Clustering)
@@ -29,7 +29,7 @@ elif [ "$1" = "test2" ]; then
     
     echo "Running Task 2 (Author Clustering) inference on $TEST_FILE..."
     # TODO: Call your python inference script here
-    # python3 src/inference_task2.py "$TEST_FILE" "$OUTPUT_DIR"
+    python3 src/inference_task2.py "$TEST_FILE" "$OUTPUT_DIR"
     
 else
     # Training Mode
@@ -41,5 +41,5 @@ else
     
     echo "Training model on data in $TRAIN_DIR..."
     # TODO: Call your python training script here
-    # python3 src/train.py "$TRAIN_DIR"
+    python3 src/train.py "$TRAIN_DIR"
 fi

@@ -7,6 +7,7 @@ import re
 from collections import Counter # for counting word frequencies
 import time
 from tqdm import tqdm
+from multiprocessing import Pool
 
 class Word2Vec(nn.Module):
     def __init__(self, embedding_dim = 100, model_type = 'sg'):
@@ -36,6 +37,7 @@ class Word2Vec(nn.Module):
         
         # Subsampling threshold for frequent words
         self.subsample_threshold = 0
+        self.stop_words = True
         
         # Distance-based context weighting (Word-Space Model)
         self.use_distance_weighting = True  # Enable distance-based weighting
@@ -49,7 +51,8 @@ class Word2Vec(nn.Module):
         self.D = None  # Document embedding matrix
 
         # DEBUG
-        self.device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
+        # self.device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = "cpu"
         print(f"Using device: {self.device}")
 
     def pre_process(self, author_texts: dict[str, str]):
@@ -76,7 +79,10 @@ class Word2Vec(nn.Module):
             #\w+ matches any word character (equal to [a-zA-Z0-9_])
             #[^\w\s] matches any non-word character and non-space (equal to [^a-zA-Z0-9_])
 
-            tokens = [token for token in tokens if token not in stop_words and len(token) > 1]
+            if self.stop_words == True:
+                tokens = [token for token in tokens if token not in stop_words and len(token) > 1]
+            else:
+                tokens = [token for token in tokens if len(token) > 1]
             author_tokens[author_id] = tokens
             all_tokens.extend(tokens)
 
@@ -453,7 +459,54 @@ class Word2Vec(nn.Module):
             
             return loss
 
+    def _generate_cbow_pairs(self, author_id, tokens):
 
+        target_list = []
+        context_lists = []
+        weight_lists = []  # Store distance weights for each context word
+        doc_id_list = []  # Store document IDs
+
+        # Convert tokens to indices
+        indices = [self.word2idx.get(t, self.word2idx["<UNK>"]) for t in tokens]
+        
+        # Get document index if document embeddings are enabled
+        doc_idx = self.doc2idx.get(author_id, 0) if self.use_doc_embeddings else 0
+
+        if len(indices) < self.window_size - 1:
+            return target_list, context_lists, weight_lists, doc_id_list
+        
+        for i in range(len(indices)):
+            target_word = indices[i]
+            
+            # Subsampling: randomly discard frequent words
+            # As I dont want to spend too much time just training on common words
+            keep_prob = self.subsample_prob(target_word)
+            if np.random.random() > keep_prob:
+                continue
+            
+            # Define context window
+            dynamic_window = np.random.randint(1, self.window_size + 1)
+            window_start = max(0, i - dynamic_window)
+            window_end = min(len(indices), i + dynamic_window + 1)
+
+            context = []
+            weights = []
+            for j in range(window_start, window_end):
+                if i != j:
+                    distance = abs(i - j)
+                    weight = self.get_distance_weight(distance)
+                    context.append(indices[j])
+                    weights.append(weight)
+            
+            #(target, context list, weight list, doc_id)
+            if(len(context) > 0):
+                target_list.append(target_word)
+                context_lists.append(context)
+                weight_lists.append(weights)
+                doc_id_list.append(doc_idx)
+
+        return target_list, context_lists, weight_lists, doc_id_list
+        
     def train_cbow(self):
         # Initialize Adam Optimizer
         optimizer = torch.optim.Adam(self.parameters(), lr=0.001)
@@ -463,46 +516,16 @@ class Word2Vec(nn.Module):
         weight_lists = []  # Store distance weights for each context word
         doc_id_list = []  # Store document IDs
 
-        #Create target and context list pairs
-        for author_id, tokens in self.author_tokens.items():
-            # Convert tokens to indices
-            indices = [self.word2idx.get(t, self.word2idx["<UNK>"]) for t in tokens]
-            
-            # Get document index if document embeddings are enabled
-            doc_idx = self.doc2idx.get(author_id, 0) if self.use_doc_embeddings else 0
+        num_workers = min(3, os.cpu_count() - 1) #DEBUG
 
-            if len(indices) < self.window_size - 1:
-                continue
-            
-            for i in range(len(indices)):
-                target_word = indices[i]
-                
-                # Subsampling: randomly discard frequent words
-                # As I dont want to spend too much time just training on common words
-                keep_prob = self.subsample_prob(target_word)
-                if np.random.random() > keep_prob:
-                    continue
-                
-                # Define context window
-                dynamic_window = np.random.randint(1, self.window_size + 1)
-                window_start = max(0, i - dynamic_window)
-                window_end = min(len(indices), i + dynamic_window + 1)
+        with Pool(processes=num_workers) as pool:
+            results = pool.starmap(self._generate_cbow_pairs, [(author_id, tokens) for author_id, tokens in self.author_tokens.items()])
 
-                context = []
-                weights = []
-                for j in range(window_start, window_end):
-                    if i != j:
-                        distance = abs(i - j)
-                        weight = self.get_distance_weight(distance)
-                        context.append(indices[j])
-                        weights.append(weight)
-                
-                #(target, context list, weight list, doc_id)
-                if(len(context) > 0):
-                    target_list.append(target_word)
-                    context_lists.append(context)
-                    weight_lists.append(weights)
-                    doc_id_list.append(doc_idx)
+        for res in results:
+            target_list.extend(res[0])
+            context_lists.extend(res[1])
+            weight_lists.extend(res[2])
+            doc_id_list.extend(res[3])
 
         #Train
         print(f"Starting CBOW Training on {self.device}...") #DEBUG
@@ -565,54 +588,72 @@ class Word2Vec(nn.Module):
             elapsed = time.time() - start_time #DEBUG
             print(f"Finished Epoch {epoch+1}, Loss: {epoch_loss/batch_count:.4f}, Time: {elapsed:.2f}s") #DEBUG 
 
-    def train_skipgram(self):
-        # Initialize Adam Optimizer
-        optimizer = torch.optim.Adam(self.parameters(), lr=0.001)
-
+    def _generate_sg_pairs(self, author_id, tokens):
         # Create target and context pairs with distance weights and document IDs
         target_list = []
         context_list = []
         weight_list = []  # Store distance weights
         doc_id_list = []  # Store document IDs
 
-        for author_id, tokens in self.author_tokens.items():
-            # Convert tokens to indices
-            indices = [self.word2idx.get(t, self.word2idx["<UNK>"]) for t in tokens]
-            
-            # Get document index if document embeddings are enabled
-            doc_idx = self.doc2idx.get(author_id, 0) if self.use_doc_embeddings else 0
+        # Convert tokens to indices
+        indices = [self.word2idx.get(t, self.word2idx["<UNK>"]) for t in tokens]
+        
+        # Get document index if document embeddings are enabled
+        doc_idx = self.doc2idx.get(author_id, 0) if self.use_doc_embeddings else 0
 
-            if len(indices) < self.window_size - 1:
+        if len(indices) < self.window_size - 1:
+            return target_list, context_list, weight_list, doc_id_list
+
+        
+        for i in range(len(indices)):
+            target_word = indices[i]
+            
+            # Subsampling: randomly discard frequent words
+            keep_prob = self.subsample_prob(target_word)
+            if np.random.random() > keep_prob:
                 continue
-
             
-            for i in range(len(indices)):
-                target_word = indices[i]
-                
-                # Subsampling: randomly discard frequent words
-                keep_prob = self.subsample_prob(target_word)
-                if np.random.random() > keep_prob:
+            # Define context window
+            dynamic_window = np.random.randint(1, self.window_size + 1)
+            window_start = max(0, i - dynamic_window)
+            window_end = min(len(indices), i + dynamic_window + 1)
+
+            for j in range(window_start, window_end):
+                if i == j:
                     continue
                 
-                # Define context window
-                dynamic_window = np.random.randint(1, self.window_size + 1)
-                window_start = max(0, i - dynamic_window)
-                window_end = min(len(indices), i + dynamic_window + 1)
+                # Calculate distance and weight
+                distance = abs(i - j)
+                weight = self.get_distance_weight(distance)
+                
+                #pushed as pairs with weights and doc_id
+                context_word = indices[j]
+                target_list.append(target_word)
+                context_list.append(context_word)
+                weight_list.append(weight)
+                doc_id_list.append(doc_idx)
 
-                for j in range(window_start, window_end):
-                    if i == j:
-                        continue
-                    
-                    # Calculate distance and weight
-                    distance = abs(i - j)
-                    weight = self.get_distance_weight(distance)
-                    
-                    #pushed as pairs with weights and doc_id
-                    context_word = indices[j]
-                    target_list.append(target_word)
-                    context_list.append(context_word)
-                    weight_list.append(weight)
-                    doc_id_list.append(doc_idx)
+        return target_list, context_list, weight_list, doc_id_list
+
+    def train_skipgram(self):
+        # Initialize Adam Optimizer
+        optimizer = torch.optim.Adam(self.parameters(), lr=0.001)
+
+        num_workers = min(3, os.cpu_count() - 1) #DEBUG
+
+        target_list = []
+        context_list = []
+        weight_list = []
+        doc_id_list = []
+
+        with Pool(processes=num_workers) as pool:
+            results = pool.starmap(self._generate_sg_pairs, [(author_id, tokens) for author_id, tokens in self.author_tokens.items()])
+
+        for res in results:
+            target_list.extend(res[0])
+            context_list.extend(res[1])
+            weight_list.extend(res[2])
+            doc_id_list.extend(res[3])
 
         #Train
         print(f"Starting Skip-Gram Training on {self.device}...") #DEBUG
@@ -714,6 +755,28 @@ class Word2Vec(nn.Module):
             'model_type': self.model_type,
         }, f"{save_dir}/model.pt")
 
+    def load(self, directory='./models'):
+        import pickle
+        
+        checkpoint = torch.load(f"{directory}/model.pt", map_location=self.device, weights_only=False)
+        self.vocab_size = checkpoint['vocab_size']
+        self.embedding_dim = checkpoint['embedding_dim']
+        self.model_type = checkpoint['model_type']
+        
+        self.W_in = nn.Embedding(self.vocab_size, self.embedding_dim)
+        self.W_out = nn.Embedding(self.vocab_size, self.embedding_dim)
+        
+        self.W_in.load_state_dict(checkpoint['W_in'])
+        self.W_out.load_state_dict(checkpoint['W_out'])
+
+        #Load vocab
+        with open(f"{directory}/word2idx.pkl", 'rb') as f:
+            self.word2idx = pickle.load(f)
+        
+        with open(f"{directory}/idx2word.pkl", 'rb') as f:
+            self.idx2word = pickle.load(f)
+        
+        self.to(self.device)
 
 def load_data(train_dir):
     author_texts = {}
@@ -733,9 +796,14 @@ def load_data(train_dir):
     return author_texts
 
 def main():
-    #arguments
+    #arguments train_directory
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("train_directory", type=str)
+    args = parser.parse_args()
+    
 
-    train_dir = "../data/train_data"
+    train_dir = args.train_directory
     author_texts = load_data(train_dir)
 
     model = Word2Vec(300, "sg")

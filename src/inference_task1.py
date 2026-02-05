@@ -1,0 +1,97 @@
+import json
+import torch
+import numpy as np
+import os
+from model import Word2Vec
+import argparse
+
+def get_representation(text, model):
+    # Read text and get tokens
+    author_texts = {"temp_id": text}
+    author_tokens_dict, _ = model.pre_process(author_texts)
+    
+    # Extract the actual tokens list from the dictionary
+    tokens = author_tokens_dict["temp_id"]
+    
+    # Convert tokens to indices
+    indices = [model.word2idx.get(t, model.word2idx.get("<UNK>", 0)) for t in tokens]
+    
+    if not indices:
+        return np.zeros(model.embedding_dim)
+        
+    token_indices = torch.LongTensor(indices).to(model.device)
+            
+    # Get embeddings
+    embeddings = model.W_in(token_indices)
+    
+    # Average embeddings
+    representation = torch.mean(embeddings, dim=0)
+    
+    return representation.detach().cpu().numpy()
+
+def task1(query_text, candidates_dict, model):
+    # Representation of query_text
+    query_repr = get_representation(query_text, model)
+    similarities = {}
+    
+    for author_id, cand_text in candidates_dict.items():
+        cand_repr = get_representation(cand_text, model)
+
+        # Cosine similarity
+        norm_query = np.linalg.norm(query_repr)
+        norm_cand = np.linalg.norm(cand_repr)
+        
+        if norm_query == 0 or norm_cand == 0:
+            similarities[author_id] = 0.0
+        else:
+            similarity = np.dot(query_repr, cand_repr) / (norm_query * norm_cand)
+            similarities[author_id] = similarity
+
+    ranked = sorted(similarities.items(), key=lambda x: x[1], reverse=True)
+
+    print(ranked)
+    return [author_id for author_id, _ in ranked]
+
+def main():
+    # Arguments test_file output_dir
+    parser = argparse.ArgumentParser()
+    parser.add_argument("test_file", type=str)
+    parser.add_argument("output_dir", type=str)
+    args = parser.parse_args()
+    
+    # Load model
+    model = Word2Vec(300, "sg")
+    model.load("./src/models")
+    model.eval()
+
+    # Read queries
+    with open(args.test_file, "r") as f:
+        data = json.load(f)
+
+    results = []
+    for item in data:
+        query_id = item["query_id"]
+        query_text = item["query_text"]
+        candidates_dict = item["candidates"]
+
+        ranked_candidates = task1(query_text, candidates_dict, model)
+        results.append({
+            "query_id": query_id, 
+            "ranked_candidates": ranked_candidates
+        })
+    
+    # We should save task1_predictions.json inside that directory
+    if os.path.isdir(args.output_dir):
+        output_path = os.path.join(args.output_dir, "task1_predictions.json")
+    else:
+        # If it's not a directory, treat as base path and create parent if needed
+        os.makedirs(os.path.dirname(args.output_dir), exist_ok=True)
+        output_path = args.output_dir
+    
+    with open(output_path, "w") as f:
+        json.dump(results, f, indent=4)
+    
+    print(f"Task 1 completed. Results saved to {output_path}")
+
+if __name__ == "__main__":
+    main()
