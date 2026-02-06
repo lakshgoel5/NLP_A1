@@ -41,5 +41,5 @@ else
     
     echo "Training model on data in $TRAIN_DIR..."
     # TODO: Call your python training script here
-    python3 src/train.py "$TRAIN_DIR"
+    python3 src/model.py "$TRAIN_DIR"
 fi

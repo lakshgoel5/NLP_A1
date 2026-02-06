@@ -20,7 +20,7 @@ class Word2Vec(nn.Module):
         self.author_tokens = None
 
         self.lr = 0.025
-        self.epochs = 10
+        self.epochs = 8
         self.window_size = 5
 
         self.total_words = 0
@@ -36,15 +36,15 @@ class Word2Vec(nn.Module):
         self.batch_size = 256
         
         # Subsampling threshold for frequent words
-        self.subsample_threshold = 0
-        self.stop_words = True
+        self.subsample_threshold = 1e-5
+        self.stop_words = False
         
         # Distance-based context weighting (Word-Space Model)
         self.use_distance_weighting = True  # Enable distance-based weighting
-        self.weighting_scheme = "aggressive"  # "aggressive" or "glove"
+        self.weighting_scheme = "glove"  # "aggressive" or "glove"
         
         # Document-aware embeddings (Paragraph Vector / Doc2Vec)
-        self.use_doc_embeddings = True  # Enable document embeddings
+        self.use_doc_embeddings = False  # Enable document embeddings
         self.num_docs = 0
         self.doc2idx = {}  # Dict: author_id -> doc_index
         self.idx2doc = {}  # Dict: doc_index -> author_id
@@ -79,16 +79,18 @@ class Word2Vec(nn.Module):
             #\w+ matches any word character (equal to [a-zA-Z0-9_])
             #[^\w\s] matches any non-word character and non-space (equal to [^a-zA-Z0-9_])
 
+            # Keep word tokens (including one-char words like "i", "a"),
+            # but drop standalone punctuation tokens.
+            tokens = [token for token in tokens if token.isalnum()]
+
             if self.stop_words == True:
-                tokens = [token for token in tokens if token not in stop_words and len(token) > 1]
-            else:
-                tokens = [token for token in tokens if len(token) > 1]
+                tokens = [token for token in tokens if token not in stop_words]
             author_tokens[author_id] = tokens
             all_tokens.extend(tokens)
 
         return author_tokens, all_tokens
 
-    def build_vocab(self, all_tokens, min_freq=4):
+    def build_vocab(self, all_tokens, min_freq=2):
         print("\n--- [Mark] Starting Vocabulary Build ---") #DEBUG
         start = time.time() #DEBUG
         #Count

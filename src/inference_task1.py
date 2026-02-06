@@ -23,7 +23,10 @@ def get_representation(text, model):
     token_indices = torch.LongTensor(indices).to(model.device)
             
     # Get embeddings
-    embeddings = model.W_in(token_indices)
+    # For Skip-gram, using both input and output embeddings often improves quality.
+    embeddings_in = model.W_in(token_indices)
+    embeddings_out = model.W_out(token_indices)
+    embeddings = 0.5 * (embeddings_in + embeddings_out)
 
     # # Implementing SIF
 
@@ -81,10 +84,11 @@ def main():
     
     # Load model
     model = Word2Vec(300, "sg")
-    model.load("./src/models")
+    model.load("./models")
     model.eval()
 
     correct = 0
+    reciprocal_rank_sum = 0.0
     incorrect = []
 
     # Read queries
@@ -99,10 +103,14 @@ def main():
         correct_candidate = item["correct_candidate"]
 
         ranked_candidates = task1(query_text, candidates_dict, model)
-        if(ranked_candidates[0]==correct_candidate):
+        if(ranked_candidates[0] == correct_candidate):
             correct = correct+1
         else:
             incorrect.append(query_id)
+
+        if correct_candidate in ranked_candidates:
+            rank = ranked_candidates.index(correct_candidate) + 1
+            reciprocal_rank_sum += 1.0 / rank
         
         results.append({
             "query_id": query_id, 
@@ -120,8 +128,12 @@ def main():
     with open(output_path, "w") as f:
         json.dump(results, f, indent=4)
     
+    total_queries = len(data)
+    mrr = reciprocal_rank_sum / max(1, total_queries)
+
     print(f"Task 1 completed. Results saved to {output_path}")
-    print(f"Accuracy: {correct}")
+    print(f"Top-1 Accuracy: {correct}/{total_queries}")
+    print(f"MRR: {mrr:.4f}")
     print(incorrect)
 
 if __name__ == "__main__":
