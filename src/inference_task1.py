@@ -28,6 +28,8 @@ def get_representation(text, model):
     embeddings_out = model.W_out(token_indices)
     embeddings = 0.5 * (embeddings_in + embeddings_out)
 
+    # embeddings = model.W_in(token_indices)
+
     # # Implementing SIF
 
     # #Counter for words in the corpus

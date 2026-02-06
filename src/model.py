@@ -36,15 +36,15 @@ class Word2Vec(nn.Module):
         self.batch_size = 256
         
         # Subsampling threshold for frequent words
-        self.subsample_threshold = 1e-5
-        self.stop_words = False
+        self.subsample_threshold = 0
+        self.stop_words = True
         
         # Distance-based context weighting (Word-Space Model)
         self.use_distance_weighting = True  # Enable distance-based weighting
         self.weighting_scheme = "glove"  # "aggressive" or "glove"
         
         # Document-aware embeddings (Paragraph Vector / Doc2Vec)
-        self.use_doc_embeddings = False  # Enable document embeddings
+        self.use_doc_embeddings = True  # Enable document embeddings
         self.num_docs = 0
         self.doc2idx = {}  # Dict: author_id -> doc_index
         self.idx2doc = {}  # Dict: doc_index -> author_id
@@ -518,16 +518,46 @@ class Word2Vec(nn.Module):
         weight_lists = []  # Store distance weights for each context word
         doc_id_list = []  # Store document IDs
 
-        num_workers = min(3, os.cpu_count() - 1) #DEBUG
+        for author_id, tokens in self.author_tokens.items():
+            # Convert tokens to indices
+            indices = [self.word2idx.get(t, self.word2idx["<UNK>"]) for t in tokens]
+            
+            # Get document index if document embeddings are enabled
+            doc_idx = self.doc2idx.get(author_id, 0) if self.use_doc_embeddings else 0
 
-        with Pool(processes=num_workers) as pool:
-            results = pool.starmap(self._generate_cbow_pairs, [(author_id, tokens) for author_id, tokens in self.author_tokens.items()])
+            if len(indices) < self.window_size - 1:
+                continue
+            
+            for i in range(len(indices)):
+                target_word = indices[i]
+                
+                # Subsampling: randomly discard frequent words
+                # As I dont want to spend too much time just training on common words
+                keep_prob = self.subsample_prob(target_word)
+                if np.random.random() > keep_prob:
+                    continue
+                
+                # Define context window
+                dynamic_window = np.random.randint(1, self.window_size + 1)
+                window_start = max(0, i - dynamic_window)
+                window_end = min(len(indices), i + dynamic_window + 1)
 
-        for res in results:
-            target_list.extend(res[0])
-            context_lists.extend(res[1])
-            weight_lists.extend(res[2])
-            doc_id_list.extend(res[3])
+                context = []
+                weights = []
+                for j in range(window_start, window_end):
+                    if i != j:
+                        distance = abs(i - j)
+                        weight = self.get_distance_weight(distance)
+                        context.append(indices[j])
+                        weights.append(weight)
+                
+                #(target, context list, weight list, doc_id)
+                if(len(context) > 0):
+                    target_list.append(target_word)
+                    context_lists.append(context)
+                    weight_lists.append(weights)
+                    doc_id_list.append(doc_idx)
+
 
         #Train
         print(f"Starting CBOW Training on {self.device}...") #DEBUG
@@ -656,6 +686,51 @@ class Word2Vec(nn.Module):
             context_list.extend(res[1])
             weight_list.extend(res[2])
             doc_id_list.extend(res[3])
+
+
+        # target_list = []
+        # context_list = []
+        # weight_list = []  # Store distance weights
+        # doc_id_list = []  # Store document IDs
+
+        # for author_id, tokens in self.author_tokens.items():
+        #     # Convert tokens to indices
+        #     indices = [self.word2idx.get(t, self.word2idx["<UNK>"]) for t in tokens]
+            
+        #     # Get document index if document embeddings are enabled
+        #     doc_idx = self.doc2idx.get(author_id, 0) if self.use_doc_embeddings else 0
+
+        #     if len(indices) < self.window_size - 1:
+        #         continue
+
+            
+        #     for i in range(len(indices)):
+        #         target_word = indices[i]
+                
+        #         # Subsampling: randomly discard frequent words
+        #         keep_prob = self.subsample_prob(target_word)
+        #         if np.random.random() > keep_prob:
+        #             continue
+                
+        #         # Define context window
+        #         dynamic_window = np.random.randint(1, self.window_size + 1)
+        #         window_start = max(0, i - dynamic_window)
+        #         window_end = min(len(indices), i + dynamic_window + 1)
+
+        #         for j in range(window_start, window_end):
+        #             if i == j:
+        #                 continue
+                    
+        #             # Calculate distance and weight
+        #             distance = abs(i - j)
+        #             weight = self.get_distance_weight(distance)
+                    
+        #             #pushed as pairs with weights and doc_id
+        #             context_word = indices[j]
+        #             target_list.append(target_word)
+        #             context_list.append(context_word)
+        #             weight_list.append(weight)
+        #             doc_id_list.append(doc_idx)
 
         #Train
         print(f"Starting Skip-Gram Training on {self.device}...") #DEBUG
