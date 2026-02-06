@@ -23,7 +23,10 @@ def get_representation(text, model):
     token_indices = torch.LongTensor(indices).to(model.device)
             
     # Get embeddings
-    embeddings = model.W_in(token_indices)
+    # For Skip-gram, using both input and output embeddings often improves quality.
+    embeddings_in = model.W_in(token_indices)
+    embeddings_out = model.W_out(token_indices)
+    embeddings = 0.5 * (embeddings_in + embeddings_out)
 
     # # Implementing SIF
 
@@ -81,7 +84,7 @@ def main():
     
     # Load model
     model = Word2Vec(300, "sg")
-    model.load("./src/models")
+    model.load("./models")
     model.eval()
 
     correct = 0

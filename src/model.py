@@ -20,7 +20,7 @@ class Word2Vec(nn.Module):
         self.author_tokens = None
 
         self.lr = 0.025
-        self.epochs = 10
+        self.epochs = 8
         self.window_size = 5
 
         self.total_words = 0
@@ -36,15 +36,15 @@ class Word2Vec(nn.Module):
         self.batch_size = 256
         
         # Subsampling threshold for frequent words
-        self.subsample_threshold = 0
-        self.stop_words = True
+        self.subsample_threshold = 1e-4
+        self.stop_words = False
         
         # Distance-based context weighting (Word-Space Model)
         self.use_distance_weighting = True  # Enable distance-based weighting
         self.weighting_scheme = "aggressive"  # "aggressive" or "glove"
         
         # Document-aware embeddings (Paragraph Vector / Doc2Vec)
-        self.use_doc_embeddings = True  # Enable document embeddings
+        self.use_doc_embeddings = False  # Enable document embeddings
         self.num_docs = 0
         self.doc2idx = {}  # Dict: author_id -> doc_index
         self.idx2doc = {}  # Dict: doc_index -> author_id
