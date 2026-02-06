@@ -209,3 +209,6 @@ models*/
 predictions*/
 *.json
 test/
+american*/
+european*/
+sample_inputs/

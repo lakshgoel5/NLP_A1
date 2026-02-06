@@ -4,6 +4,7 @@ import numpy as np
 import os
 from model import Word2Vec
 import argparse
+from collections import Counter
 
 def get_representation(text, model):
     # Read text and get tokens
@@ -23,9 +24,28 @@ def get_representation(text, model):
             
     # Get embeddings
     embeddings = model.W_in(token_indices)
+
+    # # Implementing SIF
+
+    # #Counter for words in the corpus
+    # word_counts = Counter(tokens)
+    # total_words = len(tokens)
+
+    # # Weight(w) = a / (a + p(w))
+    # a = 0
+    # weights = []
+    # for token in tokens:
+    #     weights.append(a / (a + word_counts[token] / total_words))
+
+    # # Normalise weights to 1 by summing and dividing
+    # weights = torch.tensor(weights).to(model.device)
+    # weights = weights / torch.sum(weights)
+
+    # # embeddings * weights
+    # weighted_embeddings = embeddings * weights.unsqueeze(1)
     
-    # Average embeddings
-    representation = torch.mean(embeddings, dim=0)
+    # Average/Sum embeddings
+    representation = torch.sum(embeddings, dim=0)
     
     return representation.detach().cpu().numpy()
 
@@ -49,7 +69,7 @@ def task1(query_text, candidates_dict, model):
 
     ranked = sorted(similarities.items(), key=lambda x: x[1], reverse=True)
 
-    print(ranked)
+    # print(ranked)
     return [author_id for author_id, _ in ranked]
 
 def main():
@@ -64,6 +84,9 @@ def main():
     model.load("./src/models")
     model.eval()
 
+    correct = 0
+    incorrect = []
+
     # Read queries
     with open(args.test_file, "r") as f:
         data = json.load(f)
@@ -73,8 +96,14 @@ def main():
         query_id = item["query_id"]
         query_text = item["query_text"]
         candidates_dict = item["candidates"]
+        correct_candidate = item["correct_candidate"]
 
         ranked_candidates = task1(query_text, candidates_dict, model)
+        if(ranked_candidates[0]==correct_candidate):
+            correct = correct+1
+        else:
+            incorrect.append(query_id)
+        
         results.append({
             "query_id": query_id, 
             "ranked_candidates": ranked_candidates
@@ -92,6 +121,8 @@ def main():
         json.dump(results, f, indent=4)
     
     print(f"Task 1 completed. Results saved to {output_path}")
+    print(f"Accuracy: {correct}")
+    print(incorrect)
 
 if __name__ == "__main__":
     main()
