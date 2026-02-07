@@ -13,7 +13,13 @@ def get_representation(text, model):
     
     # Extract the actual tokens list from the dictionary
     tokens = author_tokens_dict["temp_id"]
-    
+
+    stop_tokens = {',', '.', 'the', 'and', 'of', 'to', 'a', 'in', 'i', 
+                'was', 'that', 'it', '"', '-', "'", 'he', 'you', 'she',
+                'his', 'had', 'her', 'with', 'for', 'as', 'at', 'is',
+                ';', 'on', 'but', 's'}
+
+    tokens = [t for t in tokens if t not in stop_tokens]
     # Convert tokens to indices
     indices = [model.word2idx.get(t, model.word2idx.get("<UNK>", 0)) for t in tokens]
     
@@ -50,7 +56,7 @@ def get_representation(text, model):
     # weighted_embeddings = embeddings * weights.unsqueeze(1)
     
     # Average/Sum embeddings
-    representation = torch.sum(embeddings, dim=0)
+    representation = torch.mean(embeddings, dim=0)
     
     return representation.detach().cpu().numpy()
 
@@ -85,8 +91,8 @@ def main():
     args = parser.parse_args()
     
     # Load model
-    model = Word2Vec(300, "sg")
-    model.load("./models")
+    model = Word2Vec(100)
+    model.load("./models_baseline")
     model.eval()
 
     correct = 0

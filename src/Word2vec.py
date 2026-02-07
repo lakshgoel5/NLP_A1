@@ -20,7 +20,7 @@ class Word2Vec(nn.Module):
         self.author_tokens = None
 
         self.lr = 0.025
-        self.epochs = 10
+        self.epochs = 8
         self.window_size = 5
 
         self.total_words = 0
@@ -41,7 +41,7 @@ class Word2Vec(nn.Module):
         
         # Distance-based context weighting (Word-Space Model)
         self.use_distance_weighting = True  # Enable distance-based weighting
-        self.weighting_scheme = "aggressive"  # "aggressive" or "glove"
+        self.weighting_scheme = "glove"  # "aggressive" or "glove"
         
         # Document-aware embeddings (Paragraph Vector / Doc2Vec)
         self.use_doc_embeddings = True  # Enable document embeddings
@@ -72,23 +72,29 @@ class Word2Vec(nn.Module):
             text = text.lower()
             #remove extra spaces
             text = ' '.join(text.split())
-            #remove stop words -> Think
-            #lemmatization -> Think
 
             tokens = re.findall(r'\w+|[^\w\s]', text) #tokenise with punctuations
             #\w+ matches any word character (equal to [a-zA-Z0-9_])
             #[^\w\s] matches any non-word character and non-space (equal to [^a-zA-Z0-9_])
 
+            tokens = [re.sub(r"([!?.,;:])\1+", r"\1", t) for t in tokens]
+            tokens = ["<NUM>" if t.isdigit() else t for t in tokens]
+            tokens = ['"' if t in {'“','”','„','"'} else t for t in tokens]
+            tokens = ["'" if t in {"‘","’","'"} else t for t in tokens]
+            # normalize dashes
+            tokens = ["-" if t in {"—","–","-"} else t for t in tokens]
+            # normalize ellipsis
+            tokens = ["..." if t == "…" else t for t in tokens]
+
+
             if self.stop_words == True:
-                tokens = [token for token in tokens if token not in stop_words and len(token) > 1]
-            else:
-                tokens = [token for token in tokens if len(token) > 1]
+                tokens = [token for token in tokens if token not in stop_words]
             author_tokens[author_id] = tokens
             all_tokens.extend(tokens)
 
         return author_tokens, all_tokens
 
-    def build_vocab(self, all_tokens, min_freq=4):
+    def build_vocab(self, all_tokens, min_freq=2):
         print("\n--- [Mark] Starting Vocabulary Build ---") #DEBUG
         start = time.time() #DEBUG
         #Count
@@ -137,34 +143,49 @@ class Word2Vec(nn.Module):
 
         return
 
+    # def subsample_prob(self, word_idx):
+    #     """
+    #     Calculate probability of keeping a word based on its frequency.
+    #     Formula from Word2Vec paper:
+    #     P(keep) = (sqrt(word_freq / (threshold * total_words)) + 1) * (threshold * total_words) / word_freq
+        
+    #     Frequent words are discarded with higher probability.
+    #     """
+    #     if self.subsample_threshold <= 0:
+    #         return 1.0  # No subsampling
+        
+    #     word_freq = self.vocab_counts[word_idx].item()
+        
+    #     # Handle zero or very low frequency (<UNK>, <PAD> tokens)
+    #     if word_freq == 0:
+    #         return 1.0  # Always keep words with zero frequency
+        
+    #     freq_ratio = word_freq / (self.subsample_threshold * self.total_words)
+        
+    #     # If freq_ratio is very small, just keep the word
+    #     if freq_ratio < 1e-10:
+    #         return 1.0
+        
+    #     # Calculate keep probability
+    #     keep_prob = (math.sqrt(freq_ratio) + 1) / freq_ratio
+        
+    #     return min(keep_prob, 1.0)  # Clamp to [0, 1]
+
+
     def subsample_prob(self, word_idx):
-        """
-        Calculate probability of keeping a word based on its frequency.
-        Formula from Word2Vec paper:
-        P(keep) = (sqrt(word_freq / (threshold * total_words)) + 1) * (threshold * total_words) / word_freq
-        
-        Frequent words are discarded with higher probability.
-        """
         if self.subsample_threshold <= 0:
-            return 1.0  # No subsampling
-        
-        word_freq = self.vocab_counts[word_idx].item()
-        
-        # Handle zero or very low frequency (<UNK>, <PAD> tokens)
-        if word_freq == 0:
-            return 1.0  # Always keep words with zero frequency
-        
-        freq_ratio = word_freq / (self.subsample_threshold * self.total_words)
-        
-        # If freq_ratio is very small, just keep the word
-        if freq_ratio < 1e-10:
             return 1.0
+
+        count = self.vocab_counts[word_idx].item()
+        if count <= 0:
+            return 1.0
+
+        f = count / self.total_words
+        t = self.subsample_threshold
+
+        keep_prob = math.sqrt(t / f)
+        return min(1.0, keep_prob)
         
-        # Calculate keep probability
-        keep_prob = (math.sqrt(freq_ratio) + 1) / freq_ratio
-        
-        return min(keep_prob, 1.0)  # Clamp to [0, 1]
-    
     def get_distance_weight(self, distance):
         """
         Calculate weight based on distance from target word.
@@ -516,16 +537,46 @@ class Word2Vec(nn.Module):
         weight_lists = []  # Store distance weights for each context word
         doc_id_list = []  # Store document IDs
 
-        num_workers = min(3, os.cpu_count() - 1) #DEBUG
+        for author_id, tokens in self.author_tokens.items():
+            # Convert tokens to indices
+            indices = [self.word2idx.get(t, self.word2idx["<UNK>"]) for t in tokens]
+            
+            # Get document index if document embeddings are enabled
+            doc_idx = self.doc2idx.get(author_id, 0) if self.use_doc_embeddings else 0
 
-        with Pool(processes=num_workers) as pool:
-            results = pool.starmap(self._generate_cbow_pairs, [(author_id, tokens) for author_id, tokens in self.author_tokens.items()])
+            if len(indices) < self.window_size - 1:
+                continue
+            
+            for i in range(len(indices)):
+                target_word = indices[i]
+                
+                # Subsampling: randomly discard frequent words
+                # As I dont want to spend too much time just training on common words
+                keep_prob = self.subsample_prob(target_word)
+                if np.random.random() > keep_prob:
+                    continue
+                
+                # Define context window
+                dynamic_window = np.random.randint(1, self.window_size + 1)
+                window_start = max(0, i - dynamic_window)
+                window_end = min(len(indices), i + dynamic_window + 1)
 
-        for res in results:
-            target_list.extend(res[0])
-            context_lists.extend(res[1])
-            weight_lists.extend(res[2])
-            doc_id_list.extend(res[3])
+                context = []
+                weights = []
+                for j in range(window_start, window_end):
+                    if i != j:
+                        distance = abs(i - j)
+                        weight = self.get_distance_weight(distance)
+                        context.append(indices[j])
+                        weights.append(weight)
+                
+                #(target, context list, weight list, doc_id)
+                if(len(context) > 0):
+                    target_list.append(target_word)
+                    context_lists.append(context)
+                    weight_lists.append(weights)
+                    doc_id_list.append(doc_idx)
+
 
         #Train
         print(f"Starting CBOW Training on {self.device}...") #DEBUG
@@ -655,6 +706,51 @@ class Word2Vec(nn.Module):
             weight_list.extend(res[2])
             doc_id_list.extend(res[3])
 
+
+        # target_list = []
+        # context_list = []
+        # weight_list = []  # Store distance weights
+        # doc_id_list = []  # Store document IDs
+
+        # for author_id, tokens in self.author_tokens.items():
+        #     # Convert tokens to indices
+        #     indices = [self.word2idx.get(t, self.word2idx["<UNK>"]) for t in tokens]
+            
+        #     # Get document index if document embeddings are enabled
+        #     doc_idx = self.doc2idx.get(author_id, 0) if self.use_doc_embeddings else 0
+
+        #     if len(indices) < self.window_size - 1:
+        #         continue
+
+            
+        #     for i in range(len(indices)):
+        #         target_word = indices[i]
+                
+        #         # Subsampling: randomly discard frequent words
+        #         keep_prob = self.subsample_prob(target_word)
+        #         if np.random.random() > keep_prob:
+        #             continue
+                
+        #         # Define context window
+        #         dynamic_window = np.random.randint(1, self.window_size + 1)
+        #         window_start = max(0, i - dynamic_window)
+        #         window_end = min(len(indices), i + dynamic_window + 1)
+
+        #         for j in range(window_start, window_end):
+        #             if i == j:
+        #                 continue
+                    
+        #             # Calculate distance and weight
+        #             distance = abs(i - j)
+        #             weight = self.get_distance_weight(distance)
+                    
+        #             #pushed as pairs with weights and doc_id
+        #             context_word = indices[j]
+        #             target_list.append(target_word)
+        #             context_list.append(context_word)
+        #             weight_list.append(weight)
+        #             doc_id_list.append(doc_idx)
+
         #Train
         print(f"Starting Skip-Gram Training on {self.device}...") #DEBUG
         for epoch in range(self.epochs):
@@ -755,6 +851,28 @@ class Word2Vec(nn.Module):
             'model_type': self.model_type,
         }, f"{save_dir}/model.pt")
 
+    def load(self, directory='./models'):
+        import pickle
+        
+        checkpoint = torch.load(f"{directory}/model.pt", map_location=self.device, weights_only=False)
+        self.vocab_size = checkpoint['vocab_size']
+        self.embedding_dim = checkpoint['embedding_dim']
+        self.model_type = checkpoint['model_type']
+        
+        self.W_in = nn.Embedding(self.vocab_size, self.embedding_dim)
+        self.W_out = nn.Embedding(self.vocab_size, self.embedding_dim)
+        
+        self.W_in.load_state_dict(checkpoint['W_in'])
+        self.W_out.load_state_dict(checkpoint['W_out'])
+
+        #Load vocab
+        with open(f"{directory}/word2idx.pkl", 'rb') as f:
+            self.word2idx = pickle.load(f)
+        
+        with open(f"{directory}/idx2word.pkl", 'rb') as f:
+            self.idx2word = pickle.load(f)
+        
+        self.to(self.device)
 
 def load_data(train_dir):
     author_texts = {}
@@ -774,12 +892,17 @@ def load_data(train_dir):
     return author_texts
 
 def main():
-    #arguments
+    #arguments train_directory
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("train_directory", type=str)
+    args = parser.parse_args()
+    
 
-    train_dir = "../data/train_data"
+    train_dir = args.train_directory
     author_texts = load_data(train_dir)
 
-    model = Word2Vec(300, "sg")
+    model = Word2Vec(100, "sg")
 
     embeddings = model.train_model(author_texts)
     model.save_embeddings('./models')
