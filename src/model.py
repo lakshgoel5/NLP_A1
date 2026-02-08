@@ -6,7 +6,6 @@ import math
 import re
 from collections import Counter # for counting word frequencies
 import time
-from tqdm import tqdm
 from multiprocessing import Pool
 
 class Word2Vec(nn.Module):
@@ -19,7 +18,7 @@ class Word2Vec(nn.Module):
         self.author_tokens = None
 
         self.lr = 0.025
-        self.epochs = 30
+        self.epochs = 40
         self.window_size = 3
 
         self.total_words = 0
@@ -37,7 +36,7 @@ class Word2Vec(nn.Module):
         self.subsample_threshold = 0
         self.stop_words = False
 
-        self.max_training_time = 28*60
+        self.max_training_time = 27*60
         
         # self.device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
         self.device = "cpu"
@@ -89,8 +88,6 @@ class Word2Vec(nn.Module):
             vocab = {word for word, count in word_counts.items() if count >= min_freq}
         else:
             vocab = set(all_tokens)
-
-        print(len(vocab))
 
         vocab_list = sorted(vocab, key=word_counts.get, reverse=True)
 
@@ -316,21 +313,18 @@ class Word2Vec(nn.Module):
         for epoch in range(self.epochs):
             # Check total time before each epoch
             if time.time() - training_start_time > self.max_training_time:
-                print(f"\n⏰ Time limit of {self.max_training_time/60:.1f}m reached. Stopping training.")
+                print(f"\nTime limit of {self.max_training_time/60:.1f}m reached. Stopping training.")
                 break
                 
             start_time = time.time() #DEBUG
             epoch_loss = 0
             batch_count = 0
-
             num_batches = (len(target_list) + self.batch_size - 1) // self.batch_size
-            pbar = tqdm(range(num_batches), desc=f"Epoch {epoch+1}/{self.epochs}")
-
             time_limit_reached = False
-            for batch_idx in pbar:
+            for batch_idx in range(num_batches):
                 # Check time inside batch loop for more precision
                 if time.time() - training_start_time > self.max_training_time:
-                    print(f"\n⏰ Time limit reached during epoch {epoch+1}. Stopping.")
+                    print(f"\nTime limit reached during epoch {epoch+1}. Stopping.")
                     time_limit_reached = True
                     break
                     
@@ -358,8 +352,6 @@ class Word2Vec(nn.Module):
                 loss.backward()
                 optimizer.step() # Update weights
                 
-                pbar.set_postfix({'loss': loss.item()})
-
             if time_limit_reached:
                 break
                 
@@ -396,6 +388,7 @@ class Word2Vec(nn.Module):
             'W_out': self.W_out.state_dict(),
             'vocab_size': self.vocab_size,
             'embedding_dim': self.embedding_dim,
+            'vocab_counts': self.vocab_counts
         }, f"{save_dir}/model.pt")
 
         print(f"Model saved to {save_dir}")
@@ -406,6 +399,7 @@ class Word2Vec(nn.Module):
         checkpoint = torch.load(f"{directory}/model.pt", map_location=self.device, weights_only=False)
         self.vocab_size = checkpoint['vocab_size']
         self.embedding_dim = checkpoint['embedding_dim']
+        self.vocab_counts = checkpoint['vocab_counts']
         
         self.W_in = nn.Embedding(self.vocab_size, self.embedding_dim)
         self.W_out = nn.Embedding(self.vocab_size, self.embedding_dim)
@@ -441,6 +435,7 @@ def load_data(train_dir):
 
 def main():
     #arguments train_directory
+    start_time = time.time()
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("train_directory", type=str)
@@ -454,6 +449,10 @@ def main():
 
     embeddings = model.train_model(author_texts)
     model.save_embeddings('./models')
+
+    end_time = time.time()
+    elapsed = end_time - start_time
+    print(f"Total time taken: {elapsed:.2f}s")
 
 
 if __name__ == "__main__":
