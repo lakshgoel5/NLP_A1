@@ -108,17 +108,17 @@ def main():
         query_id = item["query_id"]
         query_text = item["query_text"]
         candidates_dict = item["candidates"]
-        correct_candidate = item["correct_candidate"]
+        # correct_candidate = item["correct_candidate"]
 
         ranked_candidates = task1(query_text, candidates_dict, model)
-        if(ranked_candidates[0] == correct_candidate):
-            correct = correct+1
-        else:
-            incorrect.append(query_id)
+        # if(ranked_candidates[0] == correct_candidate):
+        #     correct = correct+1
+        # else:
+        #     incorrect.append(query_id)
 
-        if correct_candidate in ranked_candidates:
-            rank = ranked_candidates.index(correct_candidate) + 1
-            reciprocal_rank_sum += 1.0 / rank
+        # if correct_candidate in ranked_candidates:
+        #     rank = ranked_candidates.index(correct_candidate) + 1
+        #     reciprocal_rank_sum += 1.0 / rank
         
         results.append({
             "query_id": query_id, 
@@ -136,13 +136,13 @@ def main():
     with open(output_path, "w") as f:
         json.dump(results, f, indent=4)
     
-    total_queries = len(data)
-    mrr = reciprocal_rank_sum / max(1, total_queries)
+    # total_queries = len(data)
+    # mrr = reciprocal_rank_sum / max(1, total_queries)
 
     print(f"Task 1 completed. Results saved to {output_path}")
-    print(f"Top-1 Accuracy: {correct}/{total_queries}")
-    print(f"MRR: {mrr:.4f}")
-    print(incorrect)
+    # print(f"Top-1 Accuracy: {correct}/{total_queries}")
+    # print(f"MRR: {mrr:.4f}")
+    # print(incorrect)
 
 if __name__ == "__main__":
     main()
