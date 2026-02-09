@@ -153,7 +153,7 @@ def main():
     # Load pre-trained model
     print("Loading pre-trained model...")
     model = Word2Vec(100)
-    model.load("./models_bottom5")
+    model.load("./models")
     model.train()
     
     # Read queries
@@ -164,7 +164,7 @@ def main():
     min_chunks_per_author = data["min_chunks_per_author"]
     chunks = data["chunks"]
     
-    model = fine_tune(model, chunks, max_epochs=40, max_time=25*60)
+    model = fine_tune(model, chunks, max_epochs=200, max_time=25*60)
 
     model.eval()
 
@@ -181,10 +181,12 @@ def main():
     for label in labels:
         results.append(label)
     
-    if args.output_dir.endswith("/") or os.path.isdir(args.output_dir):
+    # If output_dir is a directory, ends with /, or has no extension, save inside it
+    if args.output_dir.endswith("/") or os.path.isdir(args.output_dir) or not os.path.splitext(args.output_dir)[1]:
         os.makedirs(args.output_dir, exist_ok=True)
         output_path = os.path.join(args.output_dir, "task2_predictions.json")
     else:
+        # Otherwise, treat it as a file path
         parent = os.path.dirname(args.output_dir)
         if parent:
             os.makedirs(parent, exist_ok=True)

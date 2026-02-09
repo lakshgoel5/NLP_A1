@@ -19,7 +19,7 @@ class Word2Vec(nn.Module):
 
         self.lr = 0.025
         self.epochs = 40
-        self.window_size = 3
+        self.window_size = 5
 
         self.total_words = 0
         self.word2idx = {} # Dict: word -> index

@@ -92,7 +92,7 @@ def main():
     
     # Load model
     model = Word2Vec(100)
-    model.load("./models_done")
+    model.load("./models")
     model.eval()
 
     correct = 0
@@ -108,43 +108,50 @@ def main():
         query_id = item["query_id"]
         query_text = item["query_text"]
         candidates_dict = item["candidates"]
-        correct_candidate = item["correct_candidate"]
+        # correct_candidate = item["correct_candidate"]
 
         ranked_candidates = task1(query_text, candidates_dict, model)
-        if(ranked_candidates[0] == correct_candidate):
-            correct = correct+1
-        else:
-            incorrect.append(query_id)
+        # if(ranked_candidates[0] == correct_candidate):
+        #     correct = correct+1
+        # else:
+        #     incorrect.append(query_id)
 
-        if correct_candidate in ranked_candidates:
-            rank = ranked_candidates.index(correct_candidate) + 1
-            reciprocal_rank_sum += 1.0 / rank
+        # if correct_candidate in ranked_candidates:
+        #     rank = ranked_candidates.index(correct_candidate) + 1
+        #     reciprocal_rank_sum += 1.0 / rank
         
         results.append({
             "query_id": query_id, 
             "ranked_candidates": ranked_candidates
         })
     
-    # We should save task1_predictions.json inside that directory
-    if args.output_dir.endswith("/") or os.path.isdir(args.output_dir):
+    # If output_dir is a directory or ends with /, save as task1_predictions.jsonl inside it
+    if args.output_dir.endswith("/") or os.path.isdir(args.output_dir) or not os.path.splitext(args.output_dir)[1]:
         os.makedirs(args.output_dir, exist_ok=True)
-        output_path = os.path.join(args.output_dir, "task1_predictions.json")
+        output_path = os.path.join(args.output_dir, "task1_predictions.jsonl")
     else:
+        # Otherwise, treat it as a file path
         parent = os.path.dirname(args.output_dir)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        output_path = args.output_dir
+        
+        # Ensure it has .jsonl extension if it was intended to be .json
+        if args.output_dir.endswith(".json"):
+            output_path = args.output_dir[:-5] + ".jsonl"
+        else:
+            output_path = args.output_dir
     
     with open(output_path, "w") as f:
-        json.dump(results, f)
+        for res in results:
+            f.write(json.dumps(res) + "\n")
     
-    total_queries = len(data)
-    mrr = reciprocal_rank_sum / max(1, total_queries)
+    # total_queries = len(data)
+    # mrr = reciprocal_rank_sum / max(1, total_queries)
 
     print(f"Task 1 completed. Results saved to {output_path}")
-    print(f"Top-1 Accuracy: {correct}/{total_queries}")
-    print(f"MRR: {mrr:.4f}")
-    print(incorrect)
+    # print(f"Top-1 Accuracy: {correct}/{total_queries}")
+    # print(f"MRR: {mrr:.4f}")
+    # print(incorrect)
 
 if __name__ == "__main__":
     main()
