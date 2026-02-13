@@ -13,7 +13,13 @@ def get_representation(text, model):
     
     # Extract the actual tokens list from the dictionary
     tokens = author_tokens_dict["temp_id"]
-    
+
+    stop_tokens = {',', '.', 'the', 'and', 'of', 'to', 'a', 'in', 'i', 
+                'was', 'that', 'it', '"', '-', "'", 'he', 'you', 'she',
+                'his', 'had', 'her', 'with', 'for', 'as', 'at', 'is',
+                ';', 'on', 'but', 's'}
+
+    tokens = [t for t in tokens if t not in stop_tokens]
     # Convert tokens to indices
     indices = [model.word2idx.get(t, model.word2idx.get("<UNK>", 0)) for t in tokens]
     
@@ -27,6 +33,8 @@ def get_representation(text, model):
     embeddings_in = model.W_in(token_indices)
     embeddings_out = model.W_out(token_indices)
     embeddings = 0.5 * (embeddings_in + embeddings_out)
+
+    # embeddings = model.W_in(token_indices)
 
     # # Implementing SIF
 
@@ -48,7 +56,7 @@ def get_representation(text, model):
     # weighted_embeddings = embeddings * weights.unsqueeze(1)
     
     # Average/Sum embeddings
-    representation = torch.sum(embeddings, dim=0)
+    representation = torch.mean(embeddings, dim=0)
     
     return representation.detach().cpu().numpy()
 
@@ -83,11 +91,12 @@ def main():
     args = parser.parse_args()
     
     # Load model
-    model = Word2Vec(300, "sg")
+    model = Word2Vec(100)
     model.load("./models")
     model.eval()
 
     correct = 0
+    reciprocal_rank_sum = 0.0
     incorrect = []
 
     # Read queries
@@ -99,33 +108,50 @@ def main():
         query_id = item["query_id"]
         query_text = item["query_text"]
         candidates_dict = item["candidates"]
-        correct_candidate = item["correct_candidate"]
+        # correct_candidate = item["correct_candidate"]
 
         ranked_candidates = task1(query_text, candidates_dict, model)
-        if(ranked_candidates[0]==correct_candidate):
-            correct = correct+1
-        else:
-            incorrect.append(query_id)
+        # if(ranked_candidates[0] == correct_candidate):
+        #     correct = correct+1
+        # else:
+        #     incorrect.append(query_id)
+
+        # if correct_candidate in ranked_candidates:
+        #     rank = ranked_candidates.index(correct_candidate) + 1
+        #     reciprocal_rank_sum += 1.0 / rank
         
         results.append({
             "query_id": query_id, 
             "ranked_candidates": ranked_candidates
         })
     
-    # We should save task1_predictions.json inside that directory
-    if os.path.isdir(args.output_dir):
-        output_path = os.path.join(args.output_dir, "task1_predictions.json")
+    # If output_dir is a directory or ends with /, save as task1_predictions.jsonl inside it
+    if args.output_dir.endswith("/") or os.path.isdir(args.output_dir) or not os.path.splitext(args.output_dir)[1]:
+        os.makedirs(args.output_dir, exist_ok=True)
+        output_path = os.path.join(args.output_dir, "task1_predictions.jsonl")
     else:
-        # If it's not a directory, treat as base path and create parent if needed
-        os.makedirs(os.path.dirname(args.output_dir), exist_ok=True)
-        output_path = args.output_dir
+        # Otherwise, treat it as a file path
+        parent = os.path.dirname(args.output_dir)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        
+        # Ensure it has .jsonl extension if it was intended to be .json
+        if args.output_dir.endswith(".json"):
+            output_path = args.output_dir[:-5] + ".jsonl"
+        else:
+            output_path = args.output_dir
     
     with open(output_path, "w") as f:
-        json.dump(results, f, indent=4)
+        for res in results:
+            f.write(json.dumps(res) + "\n")
     
+    # total_queries = len(data)
+    # mrr = reciprocal_rank_sum / max(1, total_queries)
+
     print(f"Task 1 completed. Results saved to {output_path}")
-    print(f"Accuracy: {correct}")
-    print(incorrect)
+    # print(f"Top-1 Accuracy: {correct}/{total_queries}")
+    # print(f"MRR: {mrr:.4f}")
+    # print(incorrect)
 
 if __name__ == "__main__":
     main()
